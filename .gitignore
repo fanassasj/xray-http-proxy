@@ -1,0 +1,41 @@
+# Xray HTTP 代理项目 .gitignore
+
+# 运行时配置文件（自动生成）
+proxy-config.env
+xray-proxy-config.json
+
+# 测试产物
+test-proxy.js
+playwright-test.png
+*.png
+
+# Xray 进程文件
+/tmp/xray-proxy.pid
+
+# Node.js 依赖
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# 编辑器文件
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 日志文件
+*.log
+
+# 临时文件
+*.tmp
+*.temp
+
+# 备份文件
+*.bak
+*.backup

@@ -1,0 +1,1 @@
+# Archive\n\n这个目录包含了原始的模块化脚本，供参考使用：\n\n- `install-xray.sh` - Xray安装脚本\n- `configure-proxy.sh` - 代理配置脚本\n- `start-proxy.sh` - 代理启动脚本\n- `feature-demo.sh` - 功能演示脚本\n\n**注意**: 现在推荐使用统一的 `xray-http-proxy.sh` 脚本，这些文件仅作为参考保留。
