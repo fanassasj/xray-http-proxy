@@ -140,6 +140,58 @@ with sync_playwright() as p:
 - **Node.js**: 14+ （用于 Playwright 测试，可选）
 - **权限**: sudo 权限（仅用于安装 Xray）
 
+## 📦 部署和更新
+
+### 在新服务器上部署
+
+详细的部署指南请查看：**[DEPLOYMENT.md](DEPLOYMENT.md)**
+
+**快速部署**：
+```bash
+# 1. 克隆项目
+git clone https://github.com/your-username/xray-http-proxy.git
+cd xray-http-proxy
+
+# 2. 安装 Xray
+./xray-http-proxy.sh --install
+
+# 3. 配置代理
+./xray-http-proxy.sh --configure
+
+# 4. 启动服务
+./xray-http-proxy.sh --start -d
+
+# 5. 启用开机自启动（可选）
+./xray-http-proxy.sh --enable-autostart
+```
+
+### 更新项目
+
+**方法 1: 使用一键更新脚本（推荐）**
+```bash
+./update.sh
+```
+
+**方法 2: 手动更新**
+```bash
+# 备份配置
+cp proxy-config.env proxy-config.env.backup
+
+# 停止服务
+./xray-http-proxy.sh --stop
+
+# 拉取更新
+git pull origin main
+
+# 恢复配置
+cp proxy-config.env.backup proxy-config.env
+
+# 重启服务
+./xray-http-proxy.sh --start -d
+```
+
+完整的部署和更新指南：**[DEPLOYMENT.md](DEPLOYMENT.md)**
+
 ## 🔧 故障排除
 
 ### 常见问题
@@ -178,6 +230,15 @@ netstat -tlnp | grep :PORT
 ## 📄 许可证
 
 MIT License
+
+## 📚 完整文档
+
+- **[README.md](README.md)** - 项目介绍和快速开始（本文档）
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** - 部署和更新指南（推荐阅读）
+- **[AUTOSTART_GUIDE.md](AUTOSTART_GUIDE.md)** - 开机自启动详细指南
+- **[OPTIMIZATION_SUMMARY.md](OPTIMIZATION_SUMMARY.md)** - 项目优化说明
+- **[CHANGELOG.md](CHANGELOG.md)** - 版本更新日志
+- **[PROJECT_COMPLETION_REPORT.md](PROJECT_COMPLETION_REPORT.md)** - 项目完成度报告
 
 ## 🤝 贡献
 

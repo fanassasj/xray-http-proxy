@@ -23,6 +23,7 @@ DEFAULT_USERNAME=""
 DEFAULT_PASSWORD=""
 DEFAULT_WHITELIST=""
 DEFAULT_CONFIG_FILE="xray-proxy-config.json"
+DEFAULT_LOG_FILE="xray-proxy.log"
 
 # 颜色输出
 RED='\033[0;31m'
@@ -44,6 +45,8 @@ DAEMON=false
 STOP=false
 STATUS=false
 PID_FILE="/tmp/xray-proxy.pid"
+LOG_FILE="$DEFAULT_LOG_FILE"
+CACHED_EXTERNAL_IP=""  # 缓存外部IP，避免重复请求
 
 # 配置变量
 PROXY_PORT=""
@@ -52,6 +55,8 @@ PROXY_PASSWORD=""
 ENABLE_WHITELIST=false
 WHITELIST_ITEMS=()
 AUTO_START=true
+SYSTEMD_SERVICE_NAME="xray-http-proxy"
+SYSTEMD_SERVICE_FILE="/etc/systemd/system/${SYSTEMD_SERVICE_NAME}.service"
 
 # =============================================================================
 # 基础工具函数
@@ -108,14 +113,24 @@ generate_random_port() {
     done
 }
 
-# 获取服务器外部IP
+# 获取服务器外部IP（带缓存）
 get_external_ip() {
+    # 如果已有缓存，直接返回
+    if [ -n "$CACHED_EXTERNAL_IP" ]; then
+        echo "$CACHED_EXTERNAL_IP"
+        return 0
+    fi
+
     local external_ip
     external_ip=$(curl -s --connect-timeout 5 http://checkip.amazonaws.com 2>/dev/null || \
                  curl -s --connect-timeout 5 http://ipinfo.io/ip 2>/dev/null || \
                  curl -s --connect-timeout 5 http://icanhazip.com 2>/dev/null || \
                  echo "127.0.0.1")
-    echo "$external_ip" | tr -d '\n'
+    external_ip=$(echo "$external_ip" | tr -d '\n')
+
+    # 缓存结果
+    CACHED_EXTERNAL_IP="$external_ip"
+    echo "$external_ip"
 }
 
 # 生成随机用户名
@@ -258,6 +273,43 @@ wait_for_key() {
     read -p "按回车键继续..." -r
 }
 
+# 添加必要的IP到白名单（避免代码重复）
+add_essential_ips_to_whitelist() {
+    local whitelist_var="$1"  # 传入当前的白名单字符串
+    local auto_added=false
+
+    # 添加127.0.0.1
+    if [[ ",$whitelist_var," != *",127.0.0.1,"* ]]; then
+        if [ -z "$whitelist_var" ]; then
+            whitelist_var="127.0.0.1"
+        else
+            whitelist_var="$whitelist_var,127.0.0.1"
+        fi
+        log_success "自动添加本地回环地址: 127.0.0.1" >&2
+        auto_added=true
+    fi
+
+    # 添加服务器外部IP
+    local external_ip
+    external_ip=$(get_external_ip)
+    if [ -n "$external_ip" ] && [[ ",$whitelist_var," != *",$external_ip,"* ]]; then
+        if [ -z "$whitelist_var" ]; then
+            whitelist_var="$external_ip"
+        else
+            whitelist_var="$whitelist_var,$external_ip"
+        fi
+        log_success "自动添加服务器外部IP: $external_ip" >&2
+        auto_added=true
+    fi
+
+    if [ "$auto_added" = true ]; then
+        echo >&2
+        log_info "为确保本地测试和管理功能正常，已自动添加必要IP" >&2
+    fi
+
+    echo "$whitelist_var"
+}
+
 # =============================================================================
 # Xray 安装功能
 # =============================================================================
@@ -321,7 +373,10 @@ install_xray() {
     # 创建临时目录
     local temp_dir
     temp_dir=$(mktemp -d)
-    cd "$temp_dir"
+    cd "$temp_dir" || {
+        log_error "无法进入临时目录: $temp_dir"
+        return 1
+    }
 
     log_info "正在下载 Xray..."
 
@@ -487,37 +542,15 @@ configure_whitelist() {
             echo
             log_info "自动添加必要IP以确保功能正常..."
 
-            # 添加127.0.0.1
-            local has_localhost=false
-            for item in "${WHITELIST_ITEMS[@]}"; do
-                if [[ "$item" == "127.0.0.1" || "$item" =~ ^127\.0\.0\.1/ ]]; then
-                    has_localhost=true
-                    break
-                fi
-            done
+            # 将数组转为逗号分隔字符串
+            local whitelist_str
+            whitelist_str=$(IFS=,; echo "${WHITELIST_ITEMS[*]}")
 
-            if [ "$has_localhost" = false ]; then
-                WHITELIST_ITEMS+=("127.0.0.1")
-                log_success "自动添加本地回环地址: 127.0.0.1"
-            fi
+            # 使用统一函数添加必要IP
+            whitelist_str=$(add_essential_ips_to_whitelist "$whitelist_str")
 
-            # 添加服务器外部IP
-            local external_ip
-            external_ip=$(get_external_ip)
-            if [ -n "$external_ip" ]; then
-                local has_external=false
-                for item in "${WHITELIST_ITEMS[@]}"; do
-                    if [[ "$item" == "$external_ip" ]]; then
-                        has_external=true
-                        break
-                    fi
-                done
-
-                if [ "$has_external" = false ]; then
-                    WHITELIST_ITEMS+=("$external_ip")
-                    log_success "自动添加服务器外部IP: $external_ip"
-                fi
-            fi
+            # 转回数组
+            IFS=',' read -ra WHITELIST_ITEMS <<< "$whitelist_str"
 
             echo
             log_success "IP白名单配置完成，共添加 ${#WHITELIST_ITEMS[@]} 个项目:"
@@ -574,7 +607,9 @@ ENABLE_WHITELIST=$ENABLE_WHITELIST
 WHITELIST_ITEMS="$(IFS=,; echo "${WHITELIST_ITEMS[*]}")"
 EOF
 
-    log_info "配置已保存到 $config_file"
+    # 设置严格权限保护敏感信息
+    chmod 600 "$config_file"
+    log_info "配置已保存到 $config_file (权限: 600)"
 }
 
 # 主配置流程
@@ -615,6 +650,184 @@ main_configure() {
 }
 
 # =============================================================================
+# 配置验证功能
+# =============================================================================
+
+# 验证配置文件
+validate_config() {
+    local config_file="${1:-proxy-config.env}"
+    local silent="${2:-false}"  # 静默模式，只返回状态码
+
+    # 1. 检查配置文件是否存在
+    if [ ! -f "$config_file" ]; then
+        [ "$silent" = false ] && log_error "配置文件不存在: $config_file"
+        return 1
+    fi
+
+    # 2. 检查配置文件权限
+    local file_perms
+    file_perms=$(stat -c "%a" "$config_file" 2>/dev/null || stat -f "%OLp" "$config_file" 2>/dev/null)
+    if [ "$file_perms" != "600" ]; then
+        [ "$silent" = false ] && log_warning "配置文件权限不安全: $file_perms (建议: 600)"
+        [ "$silent" = false ] && log_info "自动修复权限..."
+        chmod 600 "$config_file"
+    fi
+
+    # 3. 加载配置文件
+    local temp_port temp_username temp_password temp_whitelist temp_enable_wl
+
+    # 安全地加载配置（避免代码注入）
+    while IFS='=' read -r key value; do
+        # 跳过注释和空行
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+
+        # 移除引号
+        value="${value%\"}"
+        value="${value#\"}"
+
+        case "$key" in
+            PROXY_PORT) temp_port="$value" ;;
+            PROXY_USERNAME) temp_username="$value" ;;
+            PROXY_PASSWORD) temp_password="$value" ;;
+            ENABLE_WHITELIST) temp_enable_wl="$value" ;;
+            WHITELIST_ITEMS) temp_whitelist="$value" ;;
+        esac
+    done < "$config_file"
+
+    local errors=0
+
+    # 4. 验证必需字段
+    if [ -z "$temp_port" ]; then
+        [ "$silent" = false ] && log_error "配置错误: 缺少 PROXY_PORT"
+        errors=$((errors + 1))
+    fi
+
+    if [ -z "$temp_username" ]; then
+        [ "$silent" = false ] && log_error "配置错误: 缺少 PROXY_USERNAME"
+        errors=$((errors + 1))
+    fi
+
+    if [ -z "$temp_password" ]; then
+        [ "$silent" = false ] && log_error "配置错误: 缺少 PROXY_PASSWORD"
+        errors=$((errors + 1))
+    fi
+
+    # 5. 验证端口号
+    if [ -n "$temp_port" ]; then
+        if ! [[ "$temp_port" =~ ^[0-9]+$ ]]; then
+            [ "$silent" = false ] && log_error "配置错误: 端口号必须是数字: $temp_port"
+            errors=$((errors + 1))
+        elif [ "$temp_port" -lt 1 ] || [ "$temp_port" -gt 65535 ]; then
+            [ "$silent" = false ] && log_error "配置错误: 端口号超出范围 (1-65535): $temp_port"
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # 6. 验证用户名（不应包含特殊字符）
+    if [ -n "$temp_username" ]; then
+        if [[ "$temp_username" =~ [[:space:]\"\'\\] ]]; then
+            [ "$silent" = false ] && log_error "配置错误: 用户名包含非法字符"
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # 7. 验证密码长度
+    if [ -n "$temp_password" ]; then
+        if [ ${#temp_password} -lt 6 ]; then
+            [ "$silent" = false ] && log_warning "配置警告: 密码长度过短 (建议至少6位)"
+        fi
+    fi
+
+    # 8. 验证白名单配置
+    if [ "$temp_enable_wl" = "true" ]; then
+        if [ -z "$temp_whitelist" ]; then
+            [ "$silent" = false ] && log_error "配置错误: 启用了白名单但未配置IP地址"
+            errors=$((errors + 1))
+        else
+            # 验证每个IP/CIDR
+            local invalid_ips=()
+            IFS=',' read -ra ips <<< "$temp_whitelist"
+            for ip in "${ips[@]}"; do
+                # 跳过空项
+                ip=$(echo "$ip" | xargs)  # 去除前后空格
+                [ -z "$ip" ] && continue
+
+                if ! validate_ip_or_cidr "$ip"; then
+                    invalid_ips+=("$ip")
+                fi
+            done
+
+            if [ ${#invalid_ips[@]} -gt 0 ]; then
+                [ "$silent" = false ] && log_error "配置错误: 无效的IP地址/网段:"
+                for invalid_ip in "${invalid_ips[@]}"; do
+                    [ "$silent" = false ] && echo "  - $invalid_ip"
+                done
+                errors=$((errors + 1))
+            fi
+        fi
+    fi
+
+    # 9. 返回验证结果
+    if [ $errors -eq 0 ]; then
+        [ "$silent" = false ] && log_success "配置验证通过 ✓"
+        return 0
+    else
+        [ "$silent" = false ] && log_error "配置验证失败，发现 $errors 个错误"
+        return 1
+    fi
+}
+
+# 快速检查配置是否存在且有效
+check_config_exists() {
+    local config_file="${1:-proxy-config.env}"
+    [ -f "$config_file" ] && validate_config "$config_file" true
+    return $?
+}
+
+# 显示配置验证详情
+show_config_validation() {
+    log_header "🔍 配置文件验证"
+    echo
+
+    local config_file="proxy-config.env"
+
+    if [ ! -f "$config_file" ]; then
+        log_error "配置文件不存在: $config_file"
+        echo
+        log_info "请先运行配置向导创建配置："
+        echo "  ./xray-http-proxy.sh --configure"
+        return 1
+    fi
+
+    log_info "正在验证配置文件: $config_file"
+    echo
+
+    if validate_config "$config_file"; then
+        echo
+        log_success "🎉 配置文件完全正常！"
+        echo
+
+        # 显示配置摘要
+        source "$config_file"
+        log_info "配置摘要："
+        echo "  端口: $PROXY_PORT"
+        echo "  用户名: $PROXY_USERNAME"
+        echo "  密码: ${PROXY_PASSWORD:0:3}*** (已隐藏)"
+        echo "  白名单: $([ "$ENABLE_WHITELIST" = true ] && echo "启用 ($WHITELIST_ITEMS)" || echo "禁用")"
+        echo "  文件权限: $(stat -c "%a" "$config_file" 2>/dev/null || stat -f "%OLp" "$config_file" 2>/dev/null)"
+    else
+        echo
+        log_error "❌ 配置验证失败"
+        echo
+        log_info "建议："
+        echo "  1. 重新运行配置向导: ./xray-http-proxy.sh --configure"
+        echo "  2. 或手动编辑配置文件: nano $config_file"
+        return 1
+    fi
+}
+
+# =============================================================================
 # 代理启动管理功能
 # =============================================================================
 
@@ -633,7 +846,9 @@ generate_config() {
     config_content=$(cat << EOF
 {
   "log": {
-    "loglevel": "warning"
+    "loglevel": "warning",
+    "access": "$LOG_FILE",
+    "error": "$LOG_FILE"
   },
   "inbounds": [
     {
@@ -654,6 +869,11 @@ generate_config() {
       "sniffing": {
         "enabled": true,
         "destOverride": ["http", "tls"]
+      },
+      "streamSettings": {
+        "sockopt": {
+          "acceptProxyProtocol": false
+        }
       }
     }
   ],
@@ -672,7 +892,7 @@ generate_config() {
 EOF
 )
 
-    # 如果有IP白名单，添加路由规则（基于来源IP限制）
+    # 如果有IP白名单，添加路由规则（真正的入站IP限制）
     if [ -n "$WHITELIST" ]; then
         # 自动添加必要的IP以确保本地测试可用
         local essential_ips="127.0.0.1"
@@ -693,24 +913,28 @@ EOF
             fi
         done
 
-        # 清理重复的逗号并更新WHITELIST
-        WHITELIST=$(echo "$updated_whitelist" | sed 's/^,//' | sed 's/,,*/,/g')
+        # 清理重复的逗号并更新WHITELIST（使用bash内置功能优化）
+        updated_whitelist="${updated_whitelist#,}"  # 删除开头的逗号
+        WHITELIST="${updated_whitelist//,,/,}"       # 删除连续的逗号
 
-        # 将逗号分隔的IP转换为 JSON 数组
+        # 将逗号分隔的IP转换为 JSON 数组（优化为单次sed操作）
         local ips_json
-        ips_json=$(echo "$WHITELIST" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/')
+        ips_json=$(echo "$WHITELIST" | sed 's/\([^,]*\)/"\1"/g')
 
+        # 使用路由规则：白名单内的IP允许，其他IP拒绝
         config_content="${config_content},
   \"routing\": {
+    \"domainStrategy\": \"AsIs\",
     \"rules\": [
       {
         \"type\": \"field\",
         \"source\": [$ips_json],
+        \"inboundTag\": [\"http-in\"],
         \"outboundTag\": \"direct\"
       },
       {
         \"type\": \"field\",
-        \"network\": \"tcp,udp\",
+        \"inboundTag\": [\"http-in\"],
         \"outboundTag\": \"blocked\"
       }
     ]
@@ -742,25 +966,29 @@ check_status() {
     fi
 }
 
-# 停止代理
+# 停止代理（改进版，使用SIGTERM优雅关闭）
 stop_proxy() {
     if [ -f "$PID_FILE" ]; then
         local pid
         pid=$(cat "$PID_FILE")
         if kill -0 "$pid" 2>/dev/null; then
             log_info "正在停止代理 (PID: $pid)..."
-            kill "$pid"
 
-            # 等待进程结束
+            # 先发送SIGTERM，给进程时间优雅关闭
+            kill -TERM "$pid" 2>/dev/null
+
+            # 等待进程结束（最多10秒）
             local count=0
             while kill -0 "$pid" 2>/dev/null && [ $count -lt 10 ]; do
                 sleep 1
                 count=$((count + 1))
             done
 
+            # 如果进程仍未结束，强制终止
             if kill -0 "$pid" 2>/dev/null; then
                 log_warning "进程未正常结束，强制终止..."
-                kill -9 "$pid"
+                kill -9 "$pid" 2>/dev/null
+                sleep 1
             fi
 
             rm -f "$PID_FILE"
@@ -808,6 +1036,7 @@ start_proxy() {
     log_info "端口: $PORT"
     log_info "用户名: $USERNAME"
     log_info "密码: $PASSWORD"
+    log_info "日志文件: $LOG_FILE"
     log_info "本地访问: http://$USERNAME:$PASSWORD@127.0.0.1:$PORT"
     log_info "外部访问: http://$USERNAME:$PASSWORD@$external_ip:$PORT"
     if [ -n "$WHITELIST" ]; then
@@ -815,16 +1044,17 @@ start_proxy() {
     fi
 
     if [ "$DAEMON" = true ]; then
-        # 后台运行
-        nohup xray run -config "$CONFIG_FILE" > /dev/null 2>&1 &
+        # 后台运行，输出到日志文件
+        nohup xray run -config "$CONFIG_FILE" >> "$LOG_FILE" 2>&1 &
         local pid=$!
         echo $pid > "$PID_FILE"
         log_success "代理已在后台启动 (PID: $pid)"
+        log_info "查看日志: tail -f $LOG_FILE"
 
         # 等待一下确保启动成功
         sleep 2
         if ! kill -0 "$pid" 2>/dev/null; then
-            log_error "代理启动失败"
+            log_error "代理启动失败，请查看日志: $LOG_FILE"
             rm -f "$PID_FILE"
             return 1
         fi
@@ -847,6 +1077,14 @@ start_proxy() {
 start_proxy_with_config() {
     log_highlight "🚀 启动代理服务器"
     echo
+
+    # 验证配置文件
+    if ! validate_config "proxy-config.env" true; then
+        log_error "配置文件验证失败，请检查配置"
+        echo
+        validate_config "proxy-config.env" false  # 显示详细错误
+        return 1
+    fi
 
     local proxy_args=("-p" "$PROXY_PORT" "-u" "$PROXY_USERNAME" "-P" "$PROXY_PASSWORD")
 
@@ -977,37 +1215,8 @@ manage_whitelist() {
                             ENABLE_WHITELIST=true
                             log_success "白名单已启用"
 
-                            # 自动添加必要的IP以确保功能正常
-                            local auto_added=false
-
-                            # 检查并添加127.0.0.1
-                            if [[ ",$WHITELIST_ITEMS," != *",127.0.0.1,"* ]]; then
-                                if [ -z "$WHITELIST_ITEMS" ]; then
-                                    WHITELIST_ITEMS="127.0.0.1"
-                                else
-                                    WHITELIST_ITEMS="$WHITELIST_ITEMS,127.0.0.1"
-                                fi
-                                log_success "自动添加本地回环地址: 127.0.0.1"
-                                auto_added=true
-                            fi
-
-                            # 检查并添加服务器外部IP
-                            local external_ip
-                            external_ip=$(get_external_ip)
-                            if [ -n "$external_ip" ] && [[ ",$WHITELIST_ITEMS," != *",$external_ip,"* ]]; then
-                                if [ -z "$WHITELIST_ITEMS" ]; then
-                                    WHITELIST_ITEMS="$external_ip"
-                                else
-                                    WHITELIST_ITEMS="$WHITELIST_ITEMS,$external_ip"
-                                fi
-                                log_success "自动添加服务器外部IP: $external_ip"
-                                auto_added=true
-                            fi
-
-                            if [ "$auto_added" = true ]; then
-                                echo
-                                log_info "为确保本地测试和管理功能正常，已自动添加必要IP"
-                            fi
+                            # 使用统一函数添加必要IP
+                            WHITELIST_ITEMS=$(add_essential_ips_to_whitelist "$WHITELIST_ITEMS")
                             ;;
                     esac
                 fi
@@ -1040,29 +1249,8 @@ manage_whitelist() {
                                         ENABLE_WHITELIST=true
                                         log_success "白名单已启用"
 
-                                        # 自动添加必要IP（如果还没有的话）
-                                        local auto_added=false
-
-                                        # 检查并添加127.0.0.1
-                                        if [[ ",$WHITELIST_ITEMS," != *",127.0.0.1,"* ]]; then
-                                            WHITELIST_ITEMS="$WHITELIST_ITEMS,127.0.0.1"
-                                            log_success "自动添加本地回环地址: 127.0.0.1"
-                                            auto_added=true
-                                        fi
-
-                                        # 检查并添加服务器外部IP
-                                        local external_ip
-                                        external_ip=$(get_external_ip)
-                                        if [ -n "$external_ip" ] && [[ ",$WHITELIST_ITEMS," != *",$external_ip,"* ]]; then
-                                            WHITELIST_ITEMS="$WHITELIST_ITEMS,$external_ip"
-                                            log_success "自动添加服务器外部IP: $external_ip"
-                                            auto_added=true
-                                        fi
-
-                                        if [ "$auto_added" = true ]; then
-                                            echo
-                                            log_info "为确保本地测试和管理功能正常，已自动添加必要IP"
-                                        fi
+                                        # 使用统一函数添加必要IP
+                                        WHITELIST_ITEMS=$(add_essential_ips_to_whitelist "$WHITELIST_ITEMS")
                                         ;;
                                 esac
                             fi
@@ -1149,6 +1337,7 @@ PROXY_PASSWORD=$PROXY_PASSWORD
 ENABLE_WHITELIST=$ENABLE_WHITELIST
 WHITELIST_ITEMS="$WHITELIST_ITEMS"
 EOF
+                chmod 600 "proxy-config.env"
 
                 log_success "配置已保存"
 
@@ -1271,12 +1460,14 @@ async function testProxy() {
             throw new Error('所有IP检查服务都无法访问');
         }
 
-        // 测试主要网站 - 使用更可靠的测试站点
-        console.log('[INFO] 访问目标网站...');
+        // 测试主要网站 - 使用可靠的测试站点
+        console.log('[INFO] 访问测试网站...');
         const testSites = [
             { url: 'https://example.com', name: 'Example.com' },
-            { url: 'https://sehuatang.org/', name: '目标网站' },
-            { url: 'https://httpbin.org/user-agent', name: 'HTTPBin' }
+            { url: 'https://httpbin.org/get', name: 'HTTPBin GET' },
+            { url: 'https://www.google.com', name: 'Google' },
+            { url: 'https://sehuatang.org/', name: 'Sehuatang.org' },
+            { url: 'https://sehuatang.net/', name: 'Sehuatang.net' }
         ];
 
         let successCount = 0;
@@ -1393,6 +1584,204 @@ test_playwright() {
 }
 
 # =============================================================================
+# 开机自启动管理功能
+# =============================================================================
+
+# 检查systemd是否可用
+check_systemd() {
+    if command -v systemctl >/dev/null 2>&1 && [ -d /etc/systemd/system ]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# 生成systemd服务文件
+generate_systemd_service() {
+    local script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+    local working_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+    cat << EOF
+[Unit]
+Description=Xray HTTP Proxy Service
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=forking
+User=$USER
+WorkingDirectory=$working_dir
+ExecStart=$script_path --start -d
+ExecStop=$script_path --stop
+ExecReload=$script_path --restart
+Restart=on-failure
+RestartSec=10s
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# 启用开机自启动
+enable_autostart() {
+    log_header "🚀 启用开机自启动"
+    echo
+
+    # 检查配置文件是否存在
+    if [ ! -f "proxy-config.env" ]; then
+        log_error "未发现代理配置文件，请先配置代理"
+        read -p "是否现在配置代理？[Y/n]: " do_config
+        case "$do_config" in
+            [nN]|[nN][oO])
+                return 1
+                ;;
+            *)
+                main_configure
+                return
+                ;;
+        esac
+    fi
+
+    if check_systemd; then
+        log_info "检测到 systemd，将创建系统服务"
+
+        # 生成服务文件
+        log_info "生成 systemd 服务文件..."
+        generate_systemd_service | sudo tee "$SYSTEMD_SERVICE_FILE" > /dev/null
+
+        if [ $? -ne 0 ]; then
+            log_error "创建服务文件失败，需要 sudo 权限"
+            return 1
+        fi
+
+        # 重新加载 systemd
+        log_info "重新加载 systemd..."
+        sudo systemctl daemon-reload
+
+        # 启用服务
+        log_info "启用开机自启动..."
+        sudo systemctl enable "$SYSTEMD_SERVICE_NAME"
+
+        if [ $? -eq 0 ]; then
+            log_success "✅ 开机自启动已启用！"
+            echo
+            log_info "服务管理命令:"
+            echo "  启动服务: sudo systemctl start $SYSTEMD_SERVICE_NAME"
+            echo "  停止服务: sudo systemctl stop $SYSTEMD_SERVICE_NAME"
+            echo "  查看状态: sudo systemctl status $SYSTEMD_SERVICE_NAME"
+            echo "  查看日志: sudo journalctl -u $SYSTEMD_SERVICE_NAME -f"
+        else
+            log_error "启用开机自启动失败"
+            return 1
+        fi
+    else
+        log_warning "未检测到 systemd"
+        log_info "尝试使用 rc.local 方式..."
+
+        # 使用 rc.local 方式
+        local script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+        local rc_local="/etc/rc.local"
+
+        if [ ! -f "$rc_local" ]; then
+            log_info "创建 rc.local 文件..."
+            sudo bash -c "cat > $rc_local" << 'EOF'
+#!/bin/bash
+# rc.local - 开机自启动脚本
+exit 0
+EOF
+            sudo chmod +x "$rc_local"
+        fi
+
+        # 检查是否已存在
+        if sudo grep -q "$script_path" "$rc_local" 2>/dev/null; then
+            log_warning "rc.local 中已存在该脚本的启动命令"
+        else
+            log_info "添加启动命令到 rc.local..."
+            sudo sed -i "/^exit 0/i $script_path --start -d" "$rc_local"
+            log_success "✅ 已添加到 rc.local"
+        fi
+    fi
+
+    wait_for_key
+}
+
+# 禁用开机自启动
+disable_autostart() {
+    log_header "⏹️ 禁用开机自启动"
+    echo
+
+    if check_systemd; then
+        if [ -f "$SYSTEMD_SERVICE_FILE" ]; then
+            log_info "禁用 systemd 服务..."
+            sudo systemctl disable "$SYSTEMD_SERVICE_NAME"
+            sudo systemctl stop "$SYSTEMD_SERVICE_NAME" 2>/dev/null
+
+            log_info "删除服务文件..."
+            sudo rm -f "$SYSTEMD_SERVICE_FILE"
+            sudo systemctl daemon-reload
+
+            log_success "✅ 开机自启动已禁用"
+        else
+            log_warning "未找到 systemd 服务文件"
+        fi
+    else
+        # 从 rc.local 中移除
+        local script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+        local rc_local="/etc/rc.local"
+
+        if [ -f "$rc_local" ]; then
+            if sudo grep -q "$script_path" "$rc_local" 2>/dev/null; then
+                log_info "从 rc.local 中移除..."
+                sudo sed -i "\|$script_path|d" "$rc_local"
+                log_success "✅ 已从 rc.local 中移除"
+            else
+                log_warning "rc.local 中未找到启动命令"
+            fi
+        fi
+    fi
+
+    wait_for_key
+}
+
+# 查看自启动状态
+check_autostart_status() {
+    log_header "📊 开机自启动状态"
+    echo
+
+    if check_systemd; then
+        if [ -f "$SYSTEMD_SERVICE_FILE" ]; then
+            log_info "systemd 服务状态:"
+            sudo systemctl status "$SYSTEMD_SERVICE_NAME" --no-pager || true
+            echo
+
+            if sudo systemctl is-enabled "$SYSTEMD_SERVICE_NAME" >/dev/null 2>&1; then
+                log_success "✅ 开机自启动: 已启用"
+            else
+                log_warning "⚠️ 开机自启动: 未启用"
+            fi
+        else
+            log_info "❌ 未配置 systemd 服务"
+        fi
+    else
+        local script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+        local rc_local="/etc/rc.local"
+
+        if [ -f "$rc_local" ] && sudo grep -q "$script_path" "$rc_local" 2>/dev/null; then
+            log_success "✅ rc.local 中已配置开机自启动"
+            echo
+            log_info "启动命令:"
+            sudo grep "$script_path" "$rc_local"
+        else
+            log_info "❌ 未配置开机自启动"
+        fi
+    fi
+
+    wait_for_key
+}
+
+# =============================================================================
 # 主控制界面
 # =============================================================================
 
@@ -1427,14 +1816,20 @@ show_menu() {
     log_menu "   3. 🚀 启动代理服务"
     log_menu "   4. ⏹️  停止代理服务"
     log_menu "   5. ⚙️  查看和修改配置文件"
+    log_menu "   6. 🔍 验证配置文件"
     echo
-    log_menu "   6. 🛡️  管理白名单"
-    log_menu "   7. 🎭 测试 Playwright 集成"
-    log_menu "   8. 📊 查看代理状态"
-    log_menu "   9. 📋 查看系统信息"
-    log_menu "  10. 🔄 重启代理服务"
-    log_menu "  11. 🧹 清理配置文件"
-    log_menu "  12. ❓ 显示帮助信息"
+    log_menu "   7. 🛡️  管理白名单"
+    log_menu "   8. 🎭 测试 Playwright 集成"
+    log_menu "   9. 📊 查看代理状态"
+    log_menu "  10. 📋 查看系统信息"
+    log_menu "  11. 🔄 重启代理服务"
+    echo
+    log_menu "  12. 🔥 启用开机自启动"
+    log_menu "  13. ⏸️  禁用开机自启动"
+    log_menu "  14. 📡 查看自启动状态"
+    echo
+    log_menu "  15. 🧹 清理配置文件"
+    log_menu "  16. ❓ 显示帮助信息"
     echo
     log_header "═══════════════════════════════════════════════════════════════"
     echo
@@ -1790,6 +2185,18 @@ start_proxy_service() {
 
     # 检查是否已有配置
     if [ -f "proxy-config.env" ]; then
+        # 验证配置文件
+        if ! validate_config "proxy-config.env" true; then
+            log_warning "配置文件存在问题"
+            validate_config "proxy-config.env" false
+            echo
+            read -p "是否继续使用此配置？[y/N]: " force_use
+            if [[ ! "$force_use" =~ ^[yY] ]]; then
+                log_info "请选择其他启动方式或重新配置"
+                return 1
+            fi
+        fi
+
         log_info "发现已有配置文件，是否使用？"
         read -p "使用已有配置启动？[Y/n]: " use_config
         case "$use_config" in
@@ -1878,7 +2285,7 @@ main_loop() {
         show_banner
         show_menu
 
-        read -p "请选择功能 [1-12] (或按 q 退出): " choice
+        read -p "请选择功能 [1-16] (或按 q 退出): " choice
         echo
 
         case "$choice" in
@@ -1902,24 +2309,37 @@ main_loop() {
                 view_edit_config
                 ;;
             6)
-                manage_whitelist
+                show_config_validation
+                wait_for_key
                 ;;
             7)
-                test_playwright
+                manage_whitelist
                 ;;
             8)
-                show_proxy_status
+                test_playwright
                 ;;
             9)
-                show_system_info
+                show_proxy_status
                 ;;
             10)
-                restart_proxy_service
+                show_system_info
                 ;;
             11)
-                cleanup_files
+                restart_proxy_service
                 ;;
             12)
+                enable_autostart
+                ;;
+            13)
+                disable_autostart
+                ;;
+            14)
+                check_autostart_status
+                ;;
+            15)
+                cleanup_files
+                ;;
+            16)
                 show_help
                 ;;
             [qQ]|[qQ][uU][iI][tT])
@@ -1927,7 +2347,7 @@ main_loop() {
                 exit 0
                 ;;
             *)
-                log_error "无效选择，请输入 1-12 或 q"
+                log_error "无效选择，请输入 1-16 或 q"
                 sleep 2
                 ;;
         esac
@@ -1959,6 +2379,12 @@ $SCRIPT_NAME v$SCRIPT_VERSION
     $0 --test                  测试 Playwright 集成
     $0 --info                  查看系统信息
     $0 --cleanup               清理配置文件
+    $0 --validate-config       验证配置文件
+
+开机自启动:
+    $0 --enable-autostart      启用开机自启动
+    $0 --disable-autostart     禁用开机自启动
+    $0 --autostart-status      查看自启动状态
 
 启动选项:
     -p, --port PORT            代理端口 (默认随机生成)
@@ -2025,6 +2451,22 @@ parse_args() {
                 ;;
             --cleanup|cleanup)
                 cleanup_files
+                exit 0
+                ;;
+            --validate-config|validate-config)
+                show_config_validation
+                exit 0
+                ;;
+            --enable-autostart|enable-autostart)
+                enable_autostart
+                exit 0
+                ;;
+            --disable-autostart|disable-autostart)
+                disable_autostart
+                exit 0
+                ;;
+            --autostart-status|autostart-status)
+                check_autostart_status
                 exit 0
                 ;;
             -p|--port)
