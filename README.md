@@ -167,12 +167,22 @@ cd xray-http-proxy
 
 ### 更新项目
 
-**方法 1: 使用一键更新脚本（推荐）**
+**方法 1: 使用集成更新功能（推荐）** ⭐
+```bash
+# 交互模式
+./xray-http-proxy.sh
+# 选择菜单项 17
+
+# 命令行模式
+./xray-http-proxy.sh --update
+```
+
+**方法 2: 使用独立更新脚本**
 ```bash
 ./update.sh
 ```
 
-**方法 2: 手动更新**
+**方法 3: 手动更新**
 ```bash
 # 备份配置
 cp proxy-config.env proxy-config.env.backup

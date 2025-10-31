@@ -14,7 +14,7 @@
 set -e
 
 # 脚本版本和信息
-SCRIPT_VERSION="2.0.0"
+SCRIPT_VERSION="2.2.1"
 SCRIPT_NAME="Xray HTTP 代理一体化脚本"
 
 # 默认配置
@@ -170,6 +170,59 @@ validate_port() {
         fi
     fi
 
+    return 0
+}
+
+# 检查端口是否可用（带详细信息）
+check_port_available() {
+    local port="$1"
+
+    # 基本验证
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        log_error "无效的端口号: $port"
+        return 1
+    fi
+
+    # 检查端口占用
+    local is_occupied=false
+
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+            is_occupied=true
+        fi
+    elif command -v ss >/dev/null 2>&1; then
+        if ss -tuln 2>/dev/null | grep -q ":$port "; then
+            is_occupied=true
+        fi
+    fi
+
+    if [ "$is_occupied" = true ]; then
+        log_error "端口 $port 已被占用"
+        echo
+        log_info "占用端口的进程信息:"
+
+        # 尝试显示占用进程的详细信息
+        if command -v lsof >/dev/null 2>&1; then
+            lsof -i :$port 2>/dev/null | head -10
+        elif command -v netstat >/dev/null 2>&1; then
+            netstat -tlnp 2>/dev/null | grep ":$port " | head -5
+        elif command -v ss >/dev/null 2>&1; then
+            ss -tlnp 2>/dev/null | grep ":$port " | head -5
+        else
+            echo "  无法获取进程信息（需要 lsof、netstat 或 ss 命令）"
+        fi
+
+        echo
+        log_info "解决方案："
+        echo "  1. 更换端口: 使用 --port 参数指定其他端口"
+        echo "  2. 停止占用进程: 使用 kill 命令停止上述进程"
+        echo "  3. 使用随机端口: 不指定 --port 参数自动生成"
+        echo
+
+        return 1
+    fi
+
+    log_info "端口 $port 可用 ✓"
     return 0
 }
 
@@ -1019,6 +1072,11 @@ start_proxy() {
         return 1
     fi
 
+    # 检查端口是否可用
+    if ! check_port_available "$PORT"; then
+        return 1
+    fi
+
     # 检查 xray 是否可用
     if ! command -v xray >/dev/null 2>&1; then
         log_error "xray 未安装或不在 PATH 中"
@@ -1369,6 +1427,212 @@ EOF
 # Playwright 测试功能
 # =============================================================================
 
+# 安装 Playwright 和浏览器（带进度提示）
+install_playwright_with_progress() {
+    log_header "📦 Playwright 依赖检查"
+    echo
+
+    # 1. 检查 Node.js
+    if ! command -v node >/dev/null 2>&1; then
+        log_error "Node.js 未安装"
+        echo
+        log_info "安装指南："
+        echo "  • Ubuntu/Debian: sudo apt install nodejs npm"
+        echo "  • CentOS/RHEL: sudo yum install nodejs npm"
+        echo "  • macOS: brew install node"
+        echo "  • 或访问: https://nodejs.org/"
+        echo
+        return 1
+    fi
+
+    log_success "✓ Node.js 已安装: $(node --version)"
+
+    # 2. 检查 npm
+    if ! command -v npm >/dev/null 2>&1; then
+        log_error "npm 未安装"
+        echo
+        log_info "请安装 npm 包管理器"
+        return 1
+    fi
+
+    log_success "✓ npm 已安装: $(npm --version)"
+    echo
+
+    # 3. 检查 Playwright 库
+    local playwright_installed=false
+    log_info "检查 Playwright 库..."
+    if node -e "require('playwright')" 2>/dev/null; then
+        local pw_version=$(node -e "console.log(require('playwright/package.json').version)" 2>/dev/null || echo "未知")
+        log_success "✓ Playwright 库已安装 (v$pw_version)"
+        playwright_installed=true
+    else
+        log_warning "✗ Playwright 库未安装"
+    fi
+
+    # 4. 检查 Chromium 浏览器
+    local browser_installed=false
+    log_info "检查 Chromium 浏览器..."
+
+    # 检查多个可能的 playwright 缓存位置
+    local browser_paths=(
+        "$HOME/.cache/ms-playwright/chromium-"*
+        "$HOME/Library/Caches/ms-playwright/chromium-"*
+        "/root/.cache/ms-playwright/chromium-"*
+    )
+
+    for path_pattern in "${browser_paths[@]}"; do
+        if ls $path_pattern 2>/dev/null | head -1 >/dev/null; then
+            log_success "✓ Chromium 浏览器已安装"
+            browser_installed=true
+            break
+        fi
+    done
+
+    if [ "$browser_installed" = false ]; then
+        log_warning "✗ Chromium 浏览器未安装"
+    fi
+
+    # 5. 如果都已安装，直接返回
+    if [ "$playwright_installed" = true ] && [ "$browser_installed" = true ]; then
+        echo
+        log_success "🎉 Playwright 环境完整，可以直接测试"
+        return 0
+    fi
+
+    # 6. 显示需要安装的内容
+    echo
+    log_warning "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_warning "检测到缺失的依赖"
+    log_warning "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    if [ "$playwright_installed" = false ]; then
+        echo "  📦 Playwright 库"
+        echo "     大小: ~50MB"
+        echo "     时间: 30秒-2分钟"
+        echo
+    fi
+
+    if [ "$browser_installed" = false ]; then
+        echo "  🌐 Chromium 浏览器"
+        echo "     大小: ~150-300MB"
+        echo "     时间: 2-10分钟（取决于网络速度）"
+        echo
+    fi
+
+    log_warning "总下载量可能达到 350MB，请确保："
+    echo "  1. 网络连接稳定"
+    echo "  2. 磁盘空间充足（至少 1GB 可用）"
+    echo "  3. 不要中断下载过程"
+    echo
+
+    # 7. 询问用户是否安装
+    read -p "是否现在安装？[Y/n]: " install_confirm
+    if [[ "$install_confirm" =~ ^[nN]$ ]]; then
+        log_info "已取消安装"
+        echo
+        log_info "提示: 您可以稍后手动安装："
+        echo "  npm install playwright"
+        echo "  npx playwright install chromium"
+        return 1
+    fi
+
+    # 8. 安装 Playwright 库（带进度）
+    if [ "$playwright_installed" = false ]; then
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "📥 步骤 1/2: 安装 Playwright 库"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "预计时间: 30秒-2分钟"
+        echo
+
+        if npm install playwright; then
+            echo
+            log_success "✅ Playwright 库安装成功"
+        else
+            echo
+            log_error "❌ Playwright 库安装失败"
+            echo
+            log_warning "可能原因："
+            echo "  1. 网络问题 - 检查网络连接"
+            echo "  2. 权限不足 - 尝试使用 sudo（不推荐）或修复 npm 权限"
+            echo "  3. 磁盘空间不足 - 检查: df -h"
+            echo "  4. npm 配置问题 - 尝试: npm config set registry https://registry.npmmirror.com"
+            echo
+            log_info "手动安装命令:"
+            echo "  npm install playwright"
+            return 1
+        fi
+    fi
+
+    # 9. 安装浏览器（带进度）
+    if [ "$browser_installed" = false ]; then
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "📥 步骤 2/2: 下载 Chromium 浏览器"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "文件大小: ~150-300MB"
+        log_info "预计时间: 2-10分钟（取决于网络速度）"
+        echo
+        log_warning "⚠️  重要提示："
+        echo "  • 下载过程可能较长，请耐心等待"
+        echo "  • 请勿中断下载，否则需要重新开始"
+        echo "  • 可以泡杯咖啡休息一下 ☕"
+        echo
+
+        # 使用 --with-deps 安装系统依赖
+        if npx playwright install chromium --with-deps 2>&1; then
+            echo
+            log_success "✅ Chromium 浏览器安装成功"
+        else
+            echo
+            log_error "❌ Chromium 浏览器安装失败"
+            echo
+            log_warning "常见解决方案："
+            echo
+            echo "  1. 网络问题"
+            echo "     • 检查网络连接"
+            echo "     • 尝试使用代理: export https_proxy=http://proxy:port"
+            echo "     • 切换下载源（如果可用）"
+            echo
+            echo "  2. 磁盘空间不足"
+            echo "     • 检查空间: df -h"
+            echo "     • 清理空间后重试"
+            echo
+            echo "  3. 权限问题"
+            echo "     • 确保有写入 $HOME/.cache 的权限"
+            echo
+            echo "  4. 系统依赖缺失"
+            echo "     • Ubuntu/Debian: sudo apt install -y libgbm1 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libpango-1.0-0 libcairo2 libasound2"
+            echo
+            log_info "手动安装命令:"
+            echo "  npx playwright install chromium --with-deps"
+            return 1
+        fi
+    fi
+
+    # 10. 最终验证
+    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "🔍 验证安装..."
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+    if node -e "require('playwright')" 2>/dev/null; then
+        log_success "✓ Playwright 库可用"
+    else
+        log_error "✗ Playwright 库验证失败"
+        return 1
+    fi
+
+    echo
+    log_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_success "🎉 Playwright 环境安装成功！"
+    log_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    return 0
+}
+
 # 创建 Playwright 测试脚本
 create_playwright_test() {
     cat > "test-proxy.js" << 'EOF'
@@ -1547,36 +1811,55 @@ test_playwright() {
         esac
     fi
 
-    # 检查 Node.js
-    if ! command -v node >/dev/null 2>&1; then
-        log_error "Node.js 未安装"
-        log_info "请先安装 Node.js: https://nodejs.org/"
+    # 检查并安装 Playwright 环境（使用新的智能安装函数）
+    if ! install_playwright_with_progress; then
+        log_error "Playwright 环境准备失败"
+        wait_for_key
         return 1
     fi
 
-    # 检查 Playwright (尝试安装)
-    if ! node -e "require('playwright')" 2>/dev/null; then
-        log_info "Playwright 未安装，正在安装..."
-        if command -v npm >/dev/null 2>&1; then
-            npm install playwright
-            npx playwright install chromium
-        else
-            log_error "npm 不可用，无法安装 Playwright"
-            return 1
-        fi
-    fi
-
     # 创建测试脚本
-    log_info "创建测试脚本..."
+    echo
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "📝 创建测试脚本..."
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     create_playwright_test
+    log_success "✓ 测试脚本已创建"
 
     # 运行测试
-    log_info "运行 Playwright 测试..."
+    echo
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "🧪 运行 Playwright 测试..."
+    log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "测试将访问5个网站，每个网站10秒超时"
+    log_info "预计耗时: 30-60秒"
+    echo
 
     if node test-proxy.js; then
-        log_success "✅ Playwright 测试通过！"
+        echo
+        log_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_success "✅ Playwright 测试完成！"
+        log_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo
+        log_info "测试文件已保存："
+        echo "  • test-proxy.js - 测试脚本"
+        echo "  • playwright-test.png - 截图证明"
     else
+        echo
+        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         log_error "❌ Playwright 测试失败"
+        log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo
+        log_warning "可能原因："
+        echo "  1. 代理服务未正常工作"
+        echo "  2. 网络连接问题"
+        echo "  3. 目标网站无法访问"
+        echo
+        log_info "排查建议："
+        echo "  1. 检查代理状态: ./xray-http-proxy.sh --status"
+        echo "  2. 查看日志: ./xray-http-proxy.sh --logs"
+        echo "  3. 手动测试: curl -x http://USER:PASS@127.0.0.1:PORT https://httpbin.org/ip"
+        wait_for_key
         return 1
     fi
 
@@ -1830,6 +2113,8 @@ show_menu() {
     echo
     log_menu "  15. 🧹 清理配置文件"
     log_menu "  16. ❓ 显示帮助信息"
+    log_menu "  17. 🔄 更新脚本到最新版本"
+    log_menu "  18. 📜 查看实时日志"
     echo
     log_header "═══════════════════════════════════════════════════════════════"
     echo
@@ -1907,6 +2192,216 @@ cleanup_files() {
     esac
 
     wait_for_key
+}
+
+# 更新脚本到最新版本
+update_script() {
+    log_header "🔄 更新脚本到最新版本"
+    echo
+
+    # 1. 检查是否在项目目录
+    if [ ! -f "xray-http-proxy.sh" ]; then
+        log_error "请在 xray-http-proxy 项目目录中运行此脚本"
+        wait_for_key
+        return 1
+    fi
+
+    # 2. 检查 Git 仓库
+    if [ ! -d ".git" ]; then
+        log_warning "这不是一个 Git 仓库"
+        log_info "如果要使用 Git 更新，请先初始化："
+        echo "  git init"
+        echo "  git remote add origin <仓库地址>"
+        echo
+        read -p "是否继续手动更新？[y/N]: " manual_update
+        if [[ ! "$manual_update" =~ ^[yY]$ ]]; then
+            log_info "更新已取消"
+            wait_for_key
+            return 0
+        fi
+    else
+        # 显示当前状态
+        log_info "当前分支: $(git branch --show-current 2>/dev/null || echo "未知")"
+        log_info "最后提交: $(git log -1 --oneline 2>/dev/null || echo "无提交记录")"
+        echo
+    fi
+
+    # 3. 备份配置文件
+    log_info "正在备份配置文件..."
+    if [ -f "proxy-config.env" ]; then
+        cp proxy-config.env proxy-config.env.backup
+        log_success "配置已备份到: proxy-config.env.backup"
+    else
+        log_warning "未找到配置文件，跳过备份"
+    fi
+
+    # 4. 停止代理服务
+    log_info "正在停止代理服务..."
+    if check_status >/dev/null 2>&1; then
+        stop_proxy
+        log_success "服务已停止"
+    else
+        log_info "服务未运行，跳过停止"
+    fi
+
+    # 5. 拉取更新（如果是 Git 仓库）
+    if [ -d ".git" ]; then
+        log_info "正在拉取最新代码..."
+
+        # 保存本地更改（如果有）
+        local STASHED=false
+        if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+            log_warning "检测到本地更改，正在暂存..."
+            git stash
+            STASHED=true
+        fi
+
+        # 拉取更新
+        if git pull origin $(git branch --show-current 2>/dev/null || echo "main"); then
+            log_success "代码已更新"
+        else
+            log_error "代码拉取失败"
+            if [ "$STASHED" = true ]; then
+                log_info "恢复本地更改..."
+                git stash pop
+            fi
+            wait_for_key
+            return 1
+        fi
+
+        # 恢复本地更改
+        if [ "$STASHED" = true ]; then
+            log_info "恢复本地更改..."
+            if git stash pop; then
+                log_success "本地更改已恢复"
+            else
+                log_warning "恢复时发现冲突，请手动解决"
+                log_info "查看冲突文件: git status"
+                log_info "解决后执行: git add . && git commit"
+            fi
+        fi
+    fi
+
+    # 6. 恢复配置文件
+    if [ -f "proxy-config.env.backup" ]; then
+        log_info "正在恢复配置文件..."
+        cp proxy-config.env.backup proxy-config.env
+        chmod 600 proxy-config.env
+        log_success "配置已恢复"
+    fi
+
+    # 7. 赋予执行权限
+    log_info "正在设置脚本权限..."
+    chmod +x xray-http-proxy.sh
+    log_success "权限已设置"
+
+    # 8. 验证配置
+    log_info "正在验证配置..."
+    if [ -f "proxy-config.env" ]; then
+        if validate_config "proxy-config.env" true >/dev/null 2>&1; then
+            log_success "配置验证通过"
+        else
+            log_error "配置验证失败"
+            echo
+            validate_config "proxy-config.env" false
+            echo
+            log_warning "请修复配置错误后手动启动服务"
+            wait_for_key
+            return 1
+        fi
+    else
+        log_warning "未找到配置文件，需要重新配置"
+        read -p "是否现在配置？[Y/n]: " do_config
+        if [[ ! "$do_config" =~ ^[nN]$ ]]; then
+            main_configure
+        fi
+    fi
+
+    # 9. 重启服务
+    log_info "正在重启代理服务..."
+    if [ -f "proxy-config.env" ]; then
+        source proxy-config.env
+        PORT="$PROXY_PORT"
+        USERNAME="$PROXY_USERNAME"
+        PASSWORD="$PROXY_PASSWORD"
+        DAEMON=true
+        if [ "$ENABLE_WHITELIST" = true ] && [ -n "$WHITELIST_ITEMS" ]; then
+            WHITELIST="$WHITELIST_ITEMS"
+        fi
+
+        if start_proxy; then
+            log_success "服务已重启"
+        else
+            log_error "服务启动失败"
+            log_info "查看日志: tail -f xray-proxy.log"
+            wait_for_key
+            return 1
+        fi
+    fi
+
+    # 10. 验证服务状态
+    sleep 2
+    echo
+    log_info "正在验证服务状态..."
+    check_status
+    echo
+
+    # 11. 显示版本信息
+    if [ -d ".git" ]; then
+        echo "═══════════════════════════════════════════════════════════════"
+        log_info "当前版本信息:"
+        log_info "  分支: $(git branch --show-current 2>/dev/null || echo "未知")"
+        log_info "  提交: $(git log -1 --oneline 2>/dev/null || echo "无提交记录")"
+        log_info "  日期: $(git log -1 --format=%cd --date=short 2>/dev/null || echo "未知")"
+        echo "═══════════════════════════════════════════════════════════════"
+    fi
+
+    echo
+    log_success "🎉 更新完成！"
+    echo
+
+    # 12. 清理备份（可选）
+    read -p "是否删除配置备份文件？[y/N]: " cleanup
+    if [[ "$cleanup" =~ ^[yY]$ ]]; then
+        rm -f proxy-config.env.backup
+        log_info "备份文件已删除"
+    fi
+
+    wait_for_key
+}
+
+# 查看实时日志
+view_logs() {
+    log_header "📜 查看实时日志"
+    echo
+
+    if [ ! -f "$LOG_FILE" ]; then
+        log_warning "日志文件不存在: $LOG_FILE"
+        echo
+        log_info "可能的原因："
+        echo "  1. 代理尚未启动过"
+        echo "  2. 日志文件已被删除"
+        echo
+        log_info "请先启动代理服务"
+        wait_for_key
+        return 1
+    fi
+
+    # 显示日志文件信息
+    local file_size=$(stat -f%z "$LOG_FILE" 2>/dev/null || stat -c%s "$LOG_FILE" 2>/dev/null || echo 0)
+    local file_size_mb=$(echo "scale=2; $file_size / 1024 / 1024" | bc 2>/dev/null || echo "unknown")
+    local line_count=$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)
+
+    log_info "日志文件: $LOG_FILE"
+    log_info "文件大小: ${file_size_mb} MB"
+    log_info "行数: $line_count"
+    echo
+    log_info "按 Ctrl+C 退出日志查看"
+    echo
+    sleep 1
+
+    # 使用 tail -f 查看实时日志
+    tail -f "$LOG_FILE"
 }
 
 # 查看系统信息
@@ -2167,6 +2662,8 @@ show_help() {
   $0 --configure          # 直接进入配置向导
   $0 --status             # 查看代理状态
   $0 --install            # 安装 Xray
+  $0 --update             # 更新脚本到最新版本
+  $0 --logs               # 查看实时日志
 
 📞 支持信息：
   • GitHub: https://github.com/XTLS/Xray-core
@@ -2285,7 +2782,7 @@ main_loop() {
         show_banner
         show_menu
 
-        read -p "请选择功能 [1-16] (或按 q 退出): " choice
+        read -p "请选择功能 [1-18] (或按 q 退出): " choice
         echo
 
         case "$choice" in
@@ -2342,12 +2839,18 @@ main_loop() {
             16)
                 show_help
                 ;;
+            17)
+                update_script
+                ;;
+            18)
+                view_logs
+                ;;
             [qQ]|[qQ][uU][iI][tT])
                 log_info "感谢使用 Xray HTTP 代理一体化脚本！"
                 exit 0
                 ;;
             *)
-                log_error "无效选择，请输入 1-16 或 q"
+                log_error "无效选择，请输入 1-18 或 q"
                 sleep 2
                 ;;
         esac
@@ -2380,6 +2883,8 @@ $SCRIPT_NAME v$SCRIPT_VERSION
     $0 --info                  查看系统信息
     $0 --cleanup               清理配置文件
     $0 --validate-config       验证配置文件
+    $0 --update                更新脚本到最新版本
+    $0 --logs                  查看实时日志
 
 开机自启动:
     $0 --enable-autostart      启用开机自启动
@@ -2468,6 +2973,14 @@ parse_args() {
             --autostart-status|autostart-status)
                 check_autostart_status
                 exit 0
+                ;;
+            --update|update)
+                update_script
+                exit 0
+                ;;
+            --logs|logs)
+                view_logs
+                exit $?
                 ;;
             -p|--port)
                 PORT="$2"
