@@ -14,7 +14,7 @@
 set -e
 
 # 脚本版本和信息
-SCRIPT_VERSION="2.2.1"
+SCRIPT_VERSION="2.2.2"
 SCRIPT_NAME="Xray HTTP 代理一体化脚本"
 
 # 默认配置
@@ -1019,6 +1019,100 @@ check_status() {
     fi
 }
 
+# 等待端口开始监听（启动健康检查）
+wait_for_port_ready() {
+    local port="$1"
+    local timeout="${2:-30}"  # 默认超时30秒
+    local count=0
+
+    log_info "等待端口 $port 开始监听（超时: ${timeout}秒）..."
+
+    while [ $count -lt $timeout ]; do
+        # 检查端口是否在监听
+        if command -v netstat >/dev/null 2>&1; then
+            if netstat -tuln 2>/dev/null | grep -q ":$port "; then
+                log_success "端口 $port 已就绪 ✓"
+                return 0
+            fi
+        elif command -v ss >/dev/null 2>&1; then
+            if ss -tuln 2>/dev/null | grep -q ":$port "; then
+                log_success "端口 $port 已就绪 ✓"
+                return 0
+            fi
+        fi
+
+        sleep 1
+        count=$((count + 1))
+
+        # 每5秒显示一次等待进度
+        if [ $((count % 5)) -eq 0 ]; then
+            log_info "仍在等待... (${count}/${timeout}秒)"
+        fi
+    done
+
+    log_error "端口 $port 在 ${timeout} 秒内未能开始监听"
+    return 1
+}
+
+# 清理僵尸 xray 进程
+kill_zombie_xray() {
+    log_info "检查并清理僵尸 xray 进程..."
+
+    # 查找所有 xray 进程
+    local xray_pids=$(pgrep -f "xray run" 2>/dev/null)
+
+    if [ -z "$xray_pids" ]; then
+        log_info "未发现 xray 进程"
+        return 0
+    fi
+
+    local killed_count=0
+    for pid in $xray_pids; do
+        # 检查进程对应的端口是否在监听
+        local is_healthy=false
+
+        # 尝试通过 lsof 检查进程打开的端口
+        if command -v lsof >/dev/null 2>&1; then
+            if lsof -P -i -a -p "$pid" 2>/dev/null | grep -q "LISTEN"; then
+                is_healthy=true
+            fi
+        fi
+
+        # 如果进程不健康（没有监听端口），杀掉它
+        if [ "$is_healthy" = false ]; then
+            log_warning "发现僵尸进程 (PID: $pid)，正在清理..."
+            kill -TERM "$pid" 2>/dev/null
+            sleep 2
+
+            # 如果还没死，强制杀掉
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid" 2>/dev/null
+            fi
+
+            killed_count=$((killed_count + 1))
+        else
+            log_info "进程 $pid 正常运行，保留"
+        fi
+    done
+
+    if [ $killed_count -gt 0 ]; then
+        log_success "已清理 $killed_count 个僵尸进程"
+    else
+        log_info "所有 xray 进程运行正常"
+    fi
+
+    # 清理孤立的 PID 文件
+    if [ -f "$PID_FILE" ]; then
+        local pid=$(cat "$PID_FILE")
+        if ! kill -0 "$pid" 2>/dev/null; then
+            log_info "清理孤立的 PID 文件"
+            rm -f "$PID_FILE"
+        fi
+    fi
+
+    return 0
+}
+
 # 停止代理（改进版，使用SIGTERM优雅关闭）
 stop_proxy() {
     if [ -f "$PID_FILE" ]; then
@@ -1060,6 +1154,9 @@ stop_proxy() {
 
 # 启动代理
 start_proxy() {
+    # 清理可能存在的僵尸进程
+    kill_zombie_xray >/dev/null 2>&1
+
     # 如果没有指定端口，生成随机端口
     if [ -z "$PORT" ]; then
         PORT=$(generate_random_port)
@@ -1109,11 +1206,33 @@ start_proxy() {
         log_success "代理已在后台启动 (PID: $pid)"
         log_info "查看日志: tail -f $LOG_FILE"
 
-        # 等待一下确保启动成功
-        sleep 2
-        if ! kill -0 "$pid" 2>/dev/null; then
-            log_error "代理启动失败，请查看日志: $LOG_FILE"
+        # 启动健康检查：验证端口是否正常监听
+        echo
+        if wait_for_port_ready "$PORT" 15; then
+            # 二次确认进程仍在运行
+            if ! kill -0 "$pid" 2>/dev/null; then
+                log_error "进程在启动后意外退出"
+                rm -f "$PID_FILE"
+                return 1
+            fi
+            echo
+            log_success "🎉 代理启动成功并已通过健康检查！"
+            return 0
+        else
+            # 启动失败，清理
+            log_error "健康检查失败：端口未能正常监听"
+            if kill -0 "$pid" 2>/dev/null; then
+                log_warning "清理启动失败的进程..."
+                kill -TERM "$pid" 2>/dev/null
+                sleep 2
+                kill -9 "$pid" 2>/dev/null
+            fi
             rm -f "$PID_FILE"
+            echo
+            log_info "故障排查建议："
+            echo "  1. 查看日志: tail -20 $LOG_FILE"
+            echo "  2. 检查配置: cat $CONFIG_FILE"
+            echo "  3. 验证 xray: xray version"
             return 1
         fi
     else
@@ -1125,6 +1244,11 @@ start_proxy() {
 
         log_success "代理已启动 (PID: $pid)"
         log_info "按 Ctrl+C 停止代理"
+
+        # 前台模式也做健康检查（但不阻塞）
+        echo
+        wait_for_port_ready "$PORT" 10 || log_warning "端口监听检查超时，请手动验证"
+        echo
 
         wait $pid
         rm -f "$PID_FILE" "$CONFIG_FILE"
@@ -1879,7 +2003,7 @@ check_systemd() {
     fi
 }
 
-# 生成systemd服务文件
+# 生成systemd服务文件（改进版，增强可靠性）
 generate_systemd_service() {
     local script_path="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
     local working_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -1887,20 +2011,45 @@ generate_systemd_service() {
     cat << EOF
 [Unit]
 Description=Xray HTTP Proxy Service
+Documentation=https://github.com/fanassasj/xray-http-proxy
 After=network.target network-online.target
 Wants=network-online.target
+# 强制要求网络完全就绪后才启动
+Requires=network-online.target
 
 [Service]
 Type=forking
 User=$USER
 WorkingDirectory=$working_dir
+
+# 启动前操作：清理僵尸进程和验证配置
+ExecStartPre=/bin/bash -c 'pkill -0 xray 2>/dev/null && echo "清理旧进程..." && pkill -TERM xray || true'
+ExecStartPre=/bin/sleep 2
+ExecStartPre=$script_path --validate-config
+
+# 启动服务
 ExecStart=$script_path --start -d
+
+# 停止和重启
 ExecStop=$script_path --stop
 ExecReload=$script_path --restart
+
+# 失败重启策略（更激进，适合开机自启动）
 Restart=on-failure
-RestartSec=10s
+RestartSec=15s
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# 日志输出
 StandardOutput=journal
 StandardError=journal
+
+# 超时设置（给健康检查足够时间）
+TimeoutStartSec=45s
+TimeoutStopSec=30s
+
+# 资源限制（可选）
+# LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
