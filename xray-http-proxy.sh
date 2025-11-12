@@ -14,7 +14,7 @@
 set -e
 
 # 脚本版本和信息
-SCRIPT_VERSION="2.2.2"
+SCRIPT_VERSION="2.2.3"
 SCRIPT_NAME="Xray HTTP 代理一体化脚本"
 
 # 默认配置
@@ -1157,7 +1157,20 @@ start_proxy() {
     # 清理可能存在的僵尸进程
     kill_zombie_xray >/dev/null 2>&1
 
-    # 如果没有指定端口，生成随机端口
+    # 如果未指定参数且存在配置文件，自动加载配置（修复开机自启动问题）
+    if [ -z "$PORT" ] && [ -z "$USERNAME" ] && [ -z "$PASSWORD" ] && [ -f "proxy-config.env" ]; then
+        log_info "检测到配置文件，自动加载..."
+        source proxy-config.env
+        PORT="$PROXY_PORT"
+        USERNAME="$PROXY_USERNAME"
+        PASSWORD="$PROXY_PASSWORD"
+        if [ "$ENABLE_WHITELIST" = true ] && [ -n "$WHITELIST_ITEMS" ]; then
+            WHITELIST="$WHITELIST_ITEMS"
+        fi
+        log_success "已加载配置: 端口=$PORT, 用户=$USERNAME"
+    fi
+
+    # 如果仍然没有指定端口，生成随机端口
     if [ -z "$PORT" ]; then
         PORT=$(generate_random_port)
         log_info "生成随机端口: $PORT"
