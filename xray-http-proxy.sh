@@ -14,8 +14,8 @@
 set -e
 
 # 脚本版本和信息
-SCRIPT_VERSION="2.2.3"
-SCRIPT_NAME="Xray HTTP 代理一体化脚本"
+SCRIPT_VERSION="2.4.1"
+SCRIPT_NAME="Xray HTTP/SOCKS5 代理一体化脚本"
 
 # 默认配置
 DEFAULT_PORT=""  # 将使用随机端口
@@ -24,6 +24,7 @@ DEFAULT_PASSWORD=""
 DEFAULT_WHITELIST=""
 DEFAULT_CONFIG_FILE="xray-proxy-config.json"
 DEFAULT_LOG_FILE="xray-proxy.log"
+DEFAULT_PROTOCOL="both"  # http, socks5, both
 
 # 颜色输出
 RED='\033[0;31m'
@@ -50,6 +51,8 @@ CACHED_EXTERNAL_IP=""  # 缓存外部IP，避免重复请求
 
 # 配置变量
 PROXY_PORT=""
+PROXY_SOCKS5_PORT=""
+PROXY_PROTOCOL="both"  # http, socks5, both
 PROXY_USERNAME=""
 PROXY_PASSWORD=""
 ENABLE_WHITELIST=false
@@ -500,28 +503,98 @@ EOF
 # 配置代理端口
 configure_port() {
     echo
-    log_highlight "📍 步骤 1: 配置代理端口"
+    log_highlight "📍 步骤 1: 配置代理协议和端口"
     echo
 
-    # 生成随机端口作为默认值
-    local default_port
-    default_port=$(generate_random_port)
-    log_info "已生成随机端口: $default_port"
+    # 选择协议
+    log_info "请选择代理协议:"
+    echo "  1) HTTP 代理"
+    echo "  2) SOCKS5 代理"
+    echo "  3) HTTP + SOCKS5 双协议 (推荐)"
     echo
 
-    while true; do
-        PROXY_PORT=$(read_input "请输入代理端口（回车使用随机端口）" "$default_port")
+    local protocol_choice
+    protocol_choice=$(read_input "请选择 [1-3]" "3")
 
-        if validate_port "$PROXY_PORT"; then
-            log_success "端口 $PROXY_PORT 可用"
-            break
-        else
-            log_error "端口 $PROXY_PORT 无效或已被占用，请选择其他端口"
-            # 重新生成一个随机端口作为建议
-            default_port=$(generate_random_port)
-            log_info "建议使用随机端口: $default_port"
-        fi
-    done
+    case "$protocol_choice" in
+        1)
+            PROXY_PROTOCOL="http"
+            log_info "已选择: HTTP 代理"
+            ;;
+        2)
+            PROXY_PROTOCOL="socks5"
+            log_info "已选择: SOCKS5 代理"
+            ;;
+        *)
+            PROXY_PROTOCOL="both"
+            log_info "已选择: HTTP + SOCKS5 双协议"
+            ;;
+    esac
+
+    echo
+
+    # 配置 HTTP 端口
+    if [ "$PROXY_PROTOCOL" = "http" ] || [ "$PROXY_PROTOCOL" = "both" ]; then
+        local default_http_port
+        default_http_port=$(generate_random_port)
+        log_info "HTTP 代理端口 (已生成随机端口: $default_http_port)"
+        echo
+
+        while true; do
+            PROXY_PORT=$(read_input "请输入 HTTP 端口（回车使用随机端口）" "$default_http_port")
+
+            if validate_port "$PROXY_PORT"; then
+                log_success "HTTP 端口 $PROXY_PORT 可用"
+                break
+            else
+                log_error "端口 $PROXY_PORT 无效或已被占用"
+                default_http_port=$(generate_random_port)
+                log_info "建议使用随机端口: $default_http_port"
+            fi
+        done
+    fi
+
+    # 配置 SOCKS5 端口
+    if [ "$PROXY_PROTOCOL" = "socks5" ] || [ "$PROXY_PROTOCOL" = "both" ]; then
+        echo
+        local default_socks5_port
+        default_socks5_port=$(generate_random_port)
+        # 确保不与 HTTP 端口冲突
+        while [ "$default_socks5_port" = "$PROXY_PORT" ]; do
+            default_socks5_port=$(generate_random_port)
+        done
+        log_info "SOCKS5 代理端口 (已生成随机端口: $default_socks5_port)"
+        echo
+
+        while true; do
+            PROXY_SOCKS5_PORT=$(read_input "请输入 SOCKS5 端口（回车使用随机端口）" "$default_socks5_port")
+
+            if [ "$PROXY_SOCKS5_PORT" = "$PROXY_PORT" ]; then
+                log_error "SOCKS5 端口不能与 HTTP 端口相同"
+                default_socks5_port=$(generate_random_port)
+                while [ "$default_socks5_port" = "$PROXY_PORT" ]; do
+                    default_socks5_port=$(generate_random_port)
+                done
+                log_info "建议使用随机端口: $default_socks5_port"
+            elif validate_port "$PROXY_SOCKS5_PORT"; then
+                log_success "SOCKS5 端口 $PROXY_SOCKS5_PORT 可用"
+                break
+            else
+                log_error "端口 $PROXY_SOCKS5_PORT 无效或已被占用"
+                default_socks5_port=$(generate_random_port)
+                while [ "$default_socks5_port" = "$PROXY_PORT" ]; do
+                    default_socks5_port=$(generate_random_port)
+                done
+                log_info "建议使用随机端口: $default_socks5_port"
+            fi
+        done
+    fi
+
+    # 单协议模式处理
+    if [ "$PROXY_PROTOCOL" = "socks5" ]; then
+        PROXY_PORT="$PROXY_SOCKS5_PORT"
+        PROXY_SOCKS5_PORT=""
+    fi
 }
 
 # 配置认证信息
@@ -623,18 +696,59 @@ show_config_summary() {
     log_highlight "📋 配置摘要"
     echo
 
+    local protocol_display
+    case "$PROXY_PROTOCOL" in
+        http)
+            protocol_display="HTTP"
+            ;;
+        socks5)
+            protocol_display="SOCKS5"
+            ;;
+        both)
+            protocol_display="HTTP + SOCKS5"
+            ;;
+    esac
+
     cat << EOF
 ┌─────────────────────────────────────────────────────────┐
 │                      代理配置信息                         │
 ├─────────────────────────────────────────────────────────┤
-│ 代理端口: $PROXY_PORT
+│ 协议类型: $protocol_display
+EOF
+
+    if [ "$PROXY_PROTOCOL" = "http" ] || [ "$PROXY_PROTOCOL" = "both" ]; then
+        echo "│ HTTP 端口: $PROXY_PORT"
+    fi
+
+    if [ "$PROXY_PROTOCOL" = "both" ]; then
+        echo "│ SOCKS5 端口: $PROXY_SOCKS5_PORT"
+    elif [ "$PROXY_PROTOCOL" = "socks5" ]; then
+        echo "│ SOCKS5 端口: $PROXY_PORT"
+    fi
+
+    cat << EOF
 │ 用户名:   $PROXY_USERNAME
 │ 密码:     $PROXY_PASSWORD
 │ 白名单:   $([ "$ENABLE_WHITELIST" = true ] && echo "已启用 - 客户端IP限制 (${#WHITELIST_ITEMS[@]} 项)" || echo "已禁用 - 允许所有IP连接")
-│ 代理URL:  http://$PROXY_USERNAME:$PROXY_PASSWORD@<外部IP>:$PROXY_PORT
 └─────────────────────────────────────────────────────────┘
 
 EOF
+
+    if [ "$PROXY_PROTOCOL" = "http" ] || [ "$PROXY_PROTOCOL" = "both" ]; then
+        echo "HTTP 代理 URL:"
+        echo "  http://$PROXY_USERNAME:$PROXY_PASSWORD@<外部IP>:$PROXY_PORT"
+        echo
+    fi
+
+    if [ "$PROXY_PROTOCOL" = "both" ]; then
+        echo "SOCKS5 代理 URL:"
+        echo "  socks5://$PROXY_USERNAME:$PROXY_PASSWORD@<外部IP>:$PROXY_SOCKS5_PORT"
+        echo
+    elif [ "$PROXY_PROTOCOL" = "socks5" ]; then
+        echo "SOCKS5 代理 URL:"
+        echo "  socks5://$PROXY_USERNAME:$PROXY_PASSWORD@<外部IP>:$PROXY_PORT"
+        echo
+    fi
 
     if [ "$ENABLE_WHITELIST" = true ]; then
         echo "允许的客户端IP:"
@@ -653,7 +767,9 @@ save_config() {
 # Xray 代理配置文件
 # 由配置向导生成
 
+PROXY_PROTOCOL=$PROXY_PROTOCOL
 PROXY_PORT=$PROXY_PORT
+PROXY_SOCKS5_PORT=$PROXY_SOCKS5_PORT
 PROXY_USERNAME=$PROXY_USERNAME
 PROXY_PASSWORD=$PROXY_PASSWORD
 ENABLE_WHITELIST=$ENABLE_WHITELIST
@@ -881,6 +997,354 @@ show_config_validation() {
 }
 
 # =============================================================================
+# 连通性测试功能
+# =============================================================================
+
+# 测试代理连通性
+test_proxy_connectivity() {
+    log_header "🧪 代理连通性测试"
+    echo
+
+    # 检查配置
+    if [ ! -f "proxy-config.env" ]; then
+        log_error "未找到配置文件"
+        return 1
+    fi
+
+    source proxy-config.env
+
+    # 检查服务是否运行
+    if ! check_status >/dev/null 2>&1; then
+        log_error "代理服务未运行"
+        return 1
+    fi
+
+    local test_url="https://httpbin.org/ip"
+    local success=0
+    local total=0
+
+    # 测试 HTTP 代理
+    if [ "${PROXY_PROTOCOL:-http}" = "http" ] || [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "测试 HTTP 代理 (127.0.0.1:$PROXY_PORT)"
+        echo
+        
+        total=$((total + 1))
+        if curl -s -m 10 -x "http://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_PORT" "$test_url" >/dev/null 2>&1; then
+            log_success "✓ HTTP 代理连接成功"
+            success=$((success + 1))
+        else
+            log_error "✗ HTTP 代理连接失败"
+        fi
+    fi
+
+    # 测试 SOCKS5 代理
+    if [ "${PROXY_PROTOCOL:-http}" = "socks5" ] || [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        local socks5_port="${PROXY_SOCKS5_PORT:-$PROXY_PORT}"
+        log_info "测试 SOCKS5 代理 (127.0.0.1:$socks5_port)"
+        echo
+        
+        total=$((total + 1))
+        if curl -s -m 10 --socks5 "$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$socks5_port" "$test_url" >/dev/null 2>&1; then
+            log_success "✓ SOCKS5 代理连接成功"
+            success=$((success + 1))
+        else
+            log_error "✗ SOCKS5 代理连接失败"
+        fi
+    fi
+
+    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [ $success -eq $total ]; then
+        log_success "🎉 所有测试通过 ($success/$total)"
+        return 0
+    else
+        log_warning "⚠️  部分测试失败 ($success/$total)"
+        return 1
+    fi
+}
+
+# 一键健康检查
+health_check() {
+    log_header "🏥 系统健康检查"
+    echo
+
+    local issues=0
+
+    # 1. 检查 Xray 安装
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "[1/6] 检查 Xray 安装"
+    if command -v xray >/dev/null 2>&1; then
+        log_success "✓ Xray 已安装"
+    else
+        log_error "✗ Xray 未安装"
+        issues=$((issues + 1))
+    fi
+
+    # 2. 检查配置文件
+    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "[2/6] 检查配置文件"
+    if [ -f "proxy-config.env" ]; then
+        if validate_config "proxy-config.env" true; then
+            log_success "✓ 配置文件有效"
+        else
+            log_error "✗ 配置文件无效"
+            issues=$((issues + 1))
+        fi
+    else
+        log_error "✗ 配置文件不存在"
+        issues=$((issues + 1))
+    fi
+
+    # 3. 检查服务状态
+    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "[3/6] 检查服务状态"
+    if check_status >/dev/null 2>&1; then
+        log_success "✓ 服务正在运行"
+    else
+        log_warning "⚠ 服务未运行"
+    fi
+
+    # 4. 检查端口监听
+    if [ -f "proxy-config.env" ]; then
+        source proxy-config.env
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "[4/6] 检查端口监听"
+        
+        if [ "${PROXY_PROTOCOL:-http}" = "http" ] || [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+            if netstat -tuln 2>/dev/null | grep -q ":$PROXY_PORT " || ss -tuln 2>/dev/null | grep -q ":$PROXY_PORT "; then
+                log_success "✓ HTTP 端口 $PROXY_PORT 正在监听"
+            else
+                log_error "✗ HTTP 端口 $PROXY_PORT 未监听"
+                issues=$((issues + 1))
+            fi
+        fi
+        
+        if [ "${PROXY_PROTOCOL:-http}" = "both" ] && [ -n "$PROXY_SOCKS5_PORT" ]; then
+            if netstat -tuln 2>/dev/null | grep -q ":$PROXY_SOCKS5_PORT " || ss -tuln 2>/dev/null | grep -q ":$PROXY_SOCKS5_PORT "; then
+                log_success "✓ SOCKS5 端口 $PROXY_SOCKS5_PORT 正在监听"
+            else
+                log_error "✗ SOCKS5 端口 $PROXY_SOCKS5_PORT 未监听"
+                issues=$((issues + 1))
+            fi
+        fi
+    fi
+
+    # 5. 检查日志文件
+    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    log_info "[5/6] 检查日志文件"
+    if [ -f "$LOG_FILE" ]; then
+        local log_size=$(du -h "$LOG_FILE" | cut -f1)
+        log_success "✓ 日志文件存在 (大小: $log_size)"
+        
+        # 检查日志大小
+        local log_size_mb=$(du -m "$LOG_FILE" | cut -f1)
+        if [ "$log_size_mb" -gt 100 ]; then
+            log_warning "⚠ 日志文件较大 (${log_size}), 建议清理"
+        fi
+    else
+        log_warning "⚠ 日志文件不存在"
+    fi
+
+    # 6. 连通性测试
+    if check_status >/dev/null 2>&1; then
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        log_info "[6/6] 连通性测试"
+        if test_proxy_connectivity >/dev/null 2>&1; then
+            log_success "✓ 代理连接正常"
+        else
+            log_error "✗ 代理连接失败"
+            issues=$((issues + 1))
+        fi
+    fi
+
+    # 总结
+    echo
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    if [ $issues -eq 0 ]; then
+        log_success "🎉 健康检查通过，系统运行正常！"
+        return 0
+    else
+        log_warning "⚠️  发现 $issues 个问题，请检查"
+        return 1
+    fi
+}
+
+# =============================================================================
+# 日志管理功能
+# =============================================================================
+
+# 查看日志
+view_logs() {
+    log_header "📋 查看日志"
+    echo
+
+    if [ ! -f "$LOG_FILE" ]; then
+        log_warning "日志文件不存在"
+        return 1
+    fi
+
+    log_info "日志文件: $LOG_FILE"
+    local log_size=$(du -h "$LOG_FILE" | cut -f1)
+    log_info "文件大小: $log_size"
+    echo
+
+    log_menu "选择操作:"
+    log_menu "  1) 查看最后 50 行"
+    log_menu "  2) 查看最后 100 行"
+    log_menu "  3) 实时监控日志"
+    log_menu "  4) 搜索日志"
+    log_menu "  5) 返回"
+    echo
+
+    read -p "请选择 [1-5]: " log_choice
+
+    case "$log_choice" in
+        1)
+            echo
+            tail -n 50 "$LOG_FILE"
+            ;;
+        2)
+            echo
+            tail -n 100 "$LOG_FILE"
+            ;;
+        3)
+            echo
+            log_info "按 Ctrl+C 退出监控"
+            sleep 1
+            tail -f "$LOG_FILE"
+            ;;
+        4)
+            echo
+            read -p "输入搜索关键词: " keyword
+            if [ -n "$keyword" ]; then
+                echo
+                grep -i "$keyword" "$LOG_FILE" | tail -n 50
+            fi
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+# 清理日志
+clean_logs() {
+    log_header "🧹 日志清理"
+    echo
+
+    if [ ! -f "$LOG_FILE" ]; then
+        log_warning "日志文件不存在"
+        return 0
+    fi
+
+    local log_size=$(du -h "$LOG_FILE" | cut -f1)
+    log_info "当前日志大小: $log_size"
+    echo
+
+    log_menu "选择清理方式:"
+    log_menu "  1) 清空日志"
+    log_menu "  2) 保留最后 1000 行"
+    log_menu "  3) 备份并清空"
+    log_menu "  4) 取消"
+    echo
+
+    read -p "请选择 [1-4]: " clean_choice
+
+    case "$clean_choice" in
+        1)
+            read -p "确认清空日志？[y/N]: " confirm
+            if [[ "$confirm" =~ ^[yY]$ ]]; then
+                > "$LOG_FILE"
+                log_success "日志已清空"
+            fi
+            ;;
+        2)
+            tail -n 1000 "$LOG_FILE" > "${LOG_FILE}.tmp"
+            mv "${LOG_FILE}.tmp" "$LOG_FILE"
+            log_success "已保留最后 1000 行"
+            ;;
+        3)
+            local backup_file="${LOG_FILE}.$(date +%Y%m%d_%H%M%S).bak"
+            cp "$LOG_FILE" "$backup_file"
+            > "$LOG_FILE"
+            log_success "已备份到: $backup_file"
+            log_success "日志已清空"
+            ;;
+        *)
+            log_info "已取消"
+            ;;
+    esac
+}
+
+# 日志轮转
+rotate_logs() {
+    local max_size_mb=50
+    
+    if [ ! -f "$LOG_FILE" ]; then
+        return 0
+    fi
+
+    local log_size_mb=$(du -m "$LOG_FILE" | cut -f1)
+    
+    if [ "$log_size_mb" -gt "$max_size_mb" ]; then
+        local backup_file="${LOG_FILE}.$(date +%Y%m%d_%H%M%S)"
+        mv "$LOG_FILE" "$backup_file"
+        touch "$LOG_FILE"
+        log_info "日志已轮转: $backup_file"
+        
+        # 只保留最近5个备份
+        ls -t "${LOG_FILE}".* 2>/dev/null | tail -n +6 | xargs -r rm -f
+    fi
+}
+
+# =============================================================================
+# 流量统计功能
+# =============================================================================
+
+# 统计流量
+show_traffic_stats() {
+    log_header "📊 流量统计"
+    echo
+
+    if [ ! -f "$LOG_FILE" ]; then
+        log_warning "日志文件不存在，无法统计"
+        return 1
+    fi
+
+    log_info "分析日志文件: $LOG_FILE"
+    echo
+
+    # 统计连接数
+    local total_connections=$(grep -c "accepted" "$LOG_FILE" 2>/dev/null || echo "0")
+    
+    # 统计错误数
+    local error_count=$(grep -c "error\|failed\|rejected" "$LOG_FILE" 2>/dev/null || echo "0")
+    
+    # 获取最近活动时间
+    local last_activity=$(tail -n 1 "$LOG_FILE" 2>/dev/null | awk '{print $1, $2}' || echo "无")
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  总连接数: $total_connections"
+    echo "  错误次数: $error_count"
+    echo "  最近活动: $last_activity"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo
+
+    # 显示最近的连接
+    log_info "最近 10 条连接记录:"
+    echo
+    grep "accepted\|tcp\|udp" "$LOG_FILE" 2>/dev/null | tail -n 10 || log_warning "暂无连接记录"
+}
+
+# =============================================================================
 # 代理启动管理功能
 # =============================================================================
 
@@ -896,6 +1360,63 @@ generate_config() {
         PASSWORD=$(generate_password)
     fi
 
+    # 构建 inbounds 数组
+    local inbounds=""
+    local inbound_tags=()
+
+    # 添加 HTTP inbound
+    if [ "$PROXY_PROTOCOL" = "http" ] || [ "$PROXY_PROTOCOL" = "both" ]; then
+        inbounds="    {
+      \"tag\": \"http-in\",
+      \"listen\": \"0.0.0.0\",
+      \"port\": $PORT,
+      \"protocol\": \"http\",
+      \"settings\": {
+        \"auth\": \"password\",
+        \"accounts\": [
+          {
+            \"user\": \"$USERNAME\",
+            \"pass\": \"$PASSWORD\"
+          }
+        ],
+        \"allowTransparent\": false
+      },
+      \"sniffing\": {
+        \"enabled\": true,
+        \"destOverride\": [\"http\", \"tls\"]
+      }
+    }"
+        inbound_tags+=("http-in")
+    fi
+
+    # 添加 SOCKS5 inbound
+    if [ "$PROXY_PROTOCOL" = "socks5" ] || [ "$PROXY_PROTOCOL" = "both" ]; then
+        local socks5_port="${PROXY_SOCKS5_PORT:-$PORT}"
+        [ -n "$inbounds" ] && inbounds="$inbounds,"
+        inbounds="$inbounds
+    {
+      \"tag\": \"socks5-in\",
+      \"listen\": \"0.0.0.0\",
+      \"port\": $socks5_port,
+      \"protocol\": \"socks\",
+      \"settings\": {
+        \"auth\": \"password\",
+        \"accounts\": [
+          {
+            \"user\": \"$USERNAME\",
+            \"pass\": \"$PASSWORD\"
+          }
+        ],
+        \"udp\": true
+      },
+      \"sniffing\": {
+        \"enabled\": true,
+        \"destOverride\": [\"http\", \"tls\"]
+      }
+    }"
+        inbound_tags+=("socks5-in")
+    fi
+
     config_content=$(cat << EOF
 {
   "log": {
@@ -904,31 +1425,7 @@ generate_config() {
     "error": "$LOG_FILE"
   },
   "inbounds": [
-    {
-      "tag": "http-in",
-      "listen": "0.0.0.0",
-      "port": $PORT,
-      "protocol": "http",
-      "settings": {
-        "auth": "password",
-        "accounts": [
-          {
-            "user": "$USERNAME",
-            "pass": "$PASSWORD"
-          }
-        ],
-        "allowTransparent": false
-      },
-      "sniffing": {
-        "enabled": true,
-        "destOverride": ["http", "tls"]
-      },
-      "streamSettings": {
-        "sockopt": {
-          "acceptProxyProtocol": false
-        }
-      }
-    }
+$inbounds
   ],
   "outbounds": [
     {
@@ -945,19 +1442,15 @@ generate_config() {
 EOF
 )
 
-    # 如果有IP白名单，添加路由规则（真正的入站IP限制）
+    # 如果有IP白名单，添加路由规则
     if [ -n "$WHITELIST" ]; then
-        # 自动添加必要的IP以确保本地测试可用
         local essential_ips="127.0.0.1"
-
-        # 获取服务器外部IP并添加到必要IP列表
         local external_ip
         external_ip=$(get_external_ip)
         if [ -n "$external_ip" ]; then
             essential_ips="$essential_ips,$external_ip"
         fi
 
-        # 检查并添加必要的IP到白名单
         local updated_whitelist="$WHITELIST"
         for essential_ip in $(echo "$essential_ips" | tr ',' ' '); do
             if ! echo "$WHITELIST" | grep -q "$essential_ip"; then
@@ -966,15 +1459,17 @@ EOF
             fi
         done
 
-        # 清理重复的逗号并更新WHITELIST（使用bash内置功能优化）
-        updated_whitelist="${updated_whitelist#,}"  # 删除开头的逗号
-        WHITELIST="${updated_whitelist//,,/,}"       # 删除连续的逗号
+        updated_whitelist="${updated_whitelist#,}"
+        WHITELIST="${updated_whitelist//,,/,}"
 
-        # 将逗号分隔的IP转换为 JSON 数组（优化为单次sed操作）
         local ips_json
         ips_json=$(echo "$WHITELIST" | sed 's/\([^,]*\)/"\1"/g')
 
-        # 使用路由规则：白名单内的IP允许，其他IP拒绝
+        # 构建 inboundTag 数组
+        local inbound_tags_json
+        inbound_tags_json=$(printf '"%s",' "${inbound_tags[@]}")
+        inbound_tags_json="[${inbound_tags_json%,}]"
+
         config_content="${config_content},
   \"routing\": {
     \"domainStrategy\": \"AsIs\",
@@ -982,12 +1477,12 @@ EOF
       {
         \"type\": \"field\",
         \"source\": [$ips_json],
-        \"inboundTag\": [\"http-in\"],
+        \"inboundTag\": $inbound_tags_json,
         \"outboundTag\": \"direct\"
       },
       {
         \"type\": \"field\",
-        \"inboundTag\": [\"http-in\"],
+        \"inboundTag\": $inbound_tags_json,
         \"outboundTag\": \"blocked\"
       }
     ]
@@ -1162,12 +1657,14 @@ start_proxy() {
         log_info "检测到配置文件，自动加载..."
         source proxy-config.env
         PORT="$PROXY_PORT"
+        PROXY_PROTOCOL="${PROXY_PROTOCOL:-http}"
+        PROXY_SOCKS5_PORT="${PROXY_SOCKS5_PORT:-}"
         USERNAME="$PROXY_USERNAME"
         PASSWORD="$PROXY_PASSWORD"
         if [ "$ENABLE_WHITELIST" = true ] && [ -n "$WHITELIST_ITEMS" ]; then
             WHITELIST="$WHITELIST_ITEMS"
         fi
-        log_success "已加载配置: 端口=$PORT, 用户=$USERNAME"
+        log_success "已加载配置: 协议=$PROXY_PROTOCOL, 端口=$PORT"
     fi
 
     # 如果仍然没有指定端口，生成随机端口
@@ -1175,6 +1672,9 @@ start_proxy() {
         PORT=$(generate_random_port)
         log_info "生成随机端口: $PORT"
     fi
+
+    # 默认协议
+    PROXY_PROTOCOL="${PROXY_PROTOCOL:-http}"
 
     # 检查是否已在运行
     if check_status >/dev/null 2>&1; then
@@ -1185,6 +1685,13 @@ start_proxy() {
     # 检查端口是否可用
     if ! check_port_available "$PORT"; then
         return 1
+    fi
+
+    # 如果是双协议模式，检查 SOCKS5 端口
+    if [ "$PROXY_PROTOCOL" = "both" ] && [ -n "$PROXY_SOCKS5_PORT" ]; then
+        if ! check_port_available "$PROXY_SOCKS5_PORT"; then
+            return 1
+        fi
     fi
 
     # 检查 xray 是否可用
@@ -1200,13 +1707,32 @@ start_proxy() {
     local external_ip
     external_ip=$(get_external_ip)
 
-    log_info "启动 Xray HTTP 代理..."
-    log_info "端口: $PORT"
+    log_info "启动 Xray 代理..."
+    log_info "协议: $PROXY_PROTOCOL"
+    if [ "$PROXY_PROTOCOL" = "http" ] || [ "$PROXY_PROTOCOL" = "both" ]; then
+        log_info "HTTP 端口: $PORT"
+    fi
+    if [ "$PROXY_PROTOCOL" = "both" ]; then
+        log_info "SOCKS5 端口: $PROXY_SOCKS5_PORT"
+    elif [ "$PROXY_PROTOCOL" = "socks5" ]; then
+        log_info "SOCKS5 端口: $PORT"
+    fi
     log_info "用户名: $USERNAME"
     log_info "密码: $PASSWORD"
     log_info "日志文件: $LOG_FILE"
-    log_info "本地访问: http://$USERNAME:$PASSWORD@127.0.0.1:$PORT"
-    log_info "外部访问: http://$USERNAME:$PASSWORD@$external_ip:$PORT"
+    
+    if [ "$PROXY_PROTOCOL" = "http" ] || [ "$PROXY_PROTOCOL" = "both" ]; then
+        log_info "HTTP 本地: http://$USERNAME:$PASSWORD@127.0.0.1:$PORT"
+        log_info "HTTP 外部: http://$USERNAME:$PASSWORD@$external_ip:$PORT"
+    fi
+    if [ "$PROXY_PROTOCOL" = "both" ]; then
+        log_info "SOCKS5 本地: socks5://$USERNAME:$PASSWORD@127.0.0.1:$PROXY_SOCKS5_PORT"
+        log_info "SOCKS5 外部: socks5://$USERNAME:$PASSWORD@$external_ip:$PROXY_SOCKS5_PORT"
+    elif [ "$PROXY_PROTOCOL" = "socks5" ]; then
+        log_info "SOCKS5 本地: socks5://$USERNAME:$PASSWORD@127.0.0.1:$PORT"
+        log_info "SOCKS5 外部: socks5://$USERNAME:$PASSWORD@$external_ip:$PORT"
+    fi
+    
     if [ -n "$WHITELIST" ]; then
         log_info "白名单: $WHITELIST"
     fi
@@ -1314,16 +1840,56 @@ start_proxy_with_config() {
 
 # 显示使用说明
 show_usage_info() {
-    cat << EOF
-$(echo -e "${GREEN}📖 使用说明:${NC}")
+    echo -e "${GREEN}📖 使用说明:${NC}"
+    echo
 
-$(echo -e "${CYAN}🔗 代理连接信息:${NC}")
-  代理地址: 127.0.0.1:$PROXY_PORT
-  用户名:   $PROXY_USERNAME
-  密码:     $PROXY_PASSWORD
-  完整URL:  http://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_PORT
+    # 显示协议信息
+    local protocol_display
+    case "${PROXY_PROTOCOL:-http}" in
+        http)
+            protocol_display="HTTP"
+            ;;
+        socks5)
+            protocol_display="SOCKS5"
+            ;;
+        both)
+            protocol_display="HTTP + SOCKS5"
+            ;;
+    esac
 
-$(echo -e "${CYAN}🎭 在 Playwright 中使用:${NC}")
+    echo -e "${CYAN}🔗 代理连接信息 (协议: $protocol_display):${NC}"
+
+    # HTTP 代理信息
+    if [ "${PROXY_PROTOCOL:-http}" = "http" ] || [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+        echo "  HTTP 代理:"
+        echo "    地址: 127.0.0.1:$PROXY_PORT"
+        echo "    用户名: $PROXY_USERNAME"
+        echo "    密码: $PROXY_PASSWORD"
+        echo "    URL: http://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_PORT"
+        echo
+    fi
+
+    # SOCKS5 代理信息
+    if [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+        echo "  SOCKS5 代理:"
+        echo "    地址: 127.0.0.1:$PROXY_SOCKS5_PORT"
+        echo "    用户名: $PROXY_USERNAME"
+        echo "    密码: $PROXY_PASSWORD"
+        echo "    URL: socks5://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_SOCKS5_PORT"
+        echo
+    elif [ "${PROXY_PROTOCOL:-http}" = "socks5" ]; then
+        echo "  SOCKS5 代理:"
+        echo "    地址: 127.0.0.1:$PROXY_PORT"
+        echo "    用户名: $PROXY_USERNAME"
+        echo "    密码: $PROXY_PASSWORD"
+        echo "    URL: socks5://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_PORT"
+        echo
+    fi
+
+    echo -e "${CYAN}🎭 在 Playwright 中使用:${NC}"
+    if [ "${PROXY_PROTOCOL:-http}" = "http" ] || [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+        cat << EOF
+  // HTTP 代理
   const { chromium } = require('playwright');
   const browser = await chromium.launch({
     proxy: {
@@ -1333,12 +1899,29 @@ $(echo -e "${CYAN}🎭 在 Playwright 中使用:${NC}")
     }
   });
 
-$(echo -e "${CYAN}⚙️  管理命令:${NC}")
-  查看状态: $0 --status
-  停止代理: $0 --stop
-  重新配置: $0 --configure
+EOF
+    fi
+
+    if [ "${PROXY_PROTOCOL:-http}" = "socks5" ] || [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+        cat << EOF
+  // SOCKS5 代理
+  const { chromium } = require('playwright');
+  const browser = await chromium.launch({
+    proxy: {
+      server: 'socks5://127.0.0.1:${PROXY_SOCKS5_PORT:-$PROXY_PORT}',
+      username: '$PROXY_USERNAME',
+      password: '$PROXY_PASSWORD'
+    }
+  });
 
 EOF
+    fi
+
+    echo -e "${CYAN}⚙️  管理命令:${NC}"
+    echo "  查看状态: $0 --status"
+    echo "  停止代理: $0 --stop"
+    echo "  重新配置: $0 --configure"
+    echo
 }
 
 # =============================================================================
@@ -1955,6 +2538,47 @@ test_playwright() {
         return 1
     fi
 
+    # 检查协议类型
+    if [ -f "proxy-config.env" ]; then
+        source proxy-config.env
+        local protocol="${PROXY_PROTOCOL:-http}"
+        
+        echo
+        log_info "当前配置协议: $protocol"
+        
+        if [ "$protocol" = "both" ]; then
+            log_info "检测到双协议模式 (HTTP + SOCKS5)"
+            echo
+            log_menu "选择测试协议:"
+            log_menu "  1) 测试 HTTP 代理"
+            log_menu "  2) 测试 SOCKS5 代理"
+            log_menu "  3) 测试两个协议"
+            echo
+            read -p "请选择 [1-3] (默认: 1): " test_choice
+            
+            case "$test_choice" in
+                2)
+                    log_info "将测试 SOCKS5 代理"
+                    local test_script="test-socks5.js"
+                    ;;
+                3)
+                    log_info "将测试 HTTP 和 SOCKS5 两个协议"
+                    local test_both=true
+                    ;;
+                *)
+                    log_info "将测试 HTTP 代理"
+                    local test_script="test-proxy.js"
+                    ;;
+            esac
+        elif [ "$protocol" = "socks5" ]; then
+            log_info "将测试 SOCKS5 代理"
+            local test_script="test-socks5.js"
+        else
+            log_info "将测试 HTTP 代理"
+            local test_script="test-proxy.js"
+        fi
+    fi
+
     # 创建测试脚本
     echo
     log_info "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1972,17 +2596,58 @@ test_playwright() {
     log_info "预计耗时: 30-60秒"
     echo
 
-    if node test-proxy.js; then
+    local test_success=true
+    
+    if [ "$test_both" = true ]; then
+        # 测试 HTTP
+        log_info ">>> 测试 HTTP 代理..."
         echo
+        if node test-proxy.js; then
+            log_success "✓ HTTP 代理测试通过"
+        else
+            log_error "✗ HTTP 代理测试失败"
+            test_success=false
+        fi
+        
+        echo
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo
+        
+        # 测试 SOCKS5
+        log_info ">>> 测试 SOCKS5 代理..."
+        echo
+        if node test-socks5.js; then
+            log_success "✓ SOCKS5 代理测试通过"
+        else
+            log_error "✗ SOCKS5 代理测试失败"
+            test_success=false
+        fi
+    else
+        # 测试单个协议
+        if node "${test_script:-test-proxy.js}"; then
+            test_success=true
+        else
+            test_success=false
+        fi
+    fi
+
+    echo
+    if [ "$test_success" = true ]; then
         log_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         log_success "✅ Playwright 测试完成！"
         log_success "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo
         log_info "测试文件已保存："
-        echo "  • test-proxy.js - 测试脚本"
-        echo "  • playwright-test.png - 截图证明"
+        if [ "$test_both" = true ]; then
+            echo "  • test-proxy.js - HTTP 测试脚本"
+            echo "  • test-socks5.js - SOCKS5 测试脚本"
+            echo "  • playwright-test.png - HTTP 截图"
+            echo "  • socks5-test.png - SOCKS5 截图"
+        else
+            echo "  • ${test_script:-test-proxy.js} - 测试脚本"
+            echo "  • playwright-test.png 或 socks5-test.png - 截图证明"
+        fi
     else
-        echo
         log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         log_error "❌ Playwright 测试失败"
         log_error "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1995,7 +2660,7 @@ test_playwright() {
         log_info "排查建议："
         echo "  1. 检查代理状态: ./xray-http-proxy.sh --status"
         echo "  2. 查看日志: ./xray-http-proxy.sh --logs"
-        echo "  3. 手动测试: curl -x http://USER:PASS@127.0.0.1:PORT https://httpbin.org/ip"
+        echo "  3. 手动测试连通性: ./xray-http-proxy.sh --test-connectivity"
         wait_for_key
         return 1
     fi
@@ -2269,14 +2934,19 @@ show_menu() {
     log_menu "  10. 📋 查看系统信息"
     log_menu "  11. 🔄 重启代理服务"
     echo
-    log_menu "  12. 🔥 启用开机自启动"
-    log_menu "  13. ⏸️  禁用开机自启动"
-    log_menu "  14. 📡 查看自启动状态"
+    log_menu "  12. 🧪 连通性测试"
+    log_menu "  13. 🏥 系统健康检查"
+    log_menu "  14. 📜 日志管理"
+    log_menu "  15. 🧹 清理日志"
+    log_menu "  16. 📊 流量统计"
     echo
-    log_menu "  15. 🧹 清理配置文件"
-    log_menu "  16. ❓ 显示帮助信息"
-    log_menu "  17. 🔄 更新脚本到最新版本"
-    log_menu "  18. 📜 查看实时日志"
+    log_menu "  17. 🔥 启用开机自启动"
+    log_menu "  18. ⏸️  禁用开机自启动"
+    log_menu "  19. 📡 查看自启动状态"
+    echo
+    log_menu "  20. 🧹 清理配置文件"
+    log_menu "  21. ❓ 显示帮助信息"
+    log_menu "  22. 🔄 更新脚本到最新版本"
     echo
     log_header "═══════════════════════════════════════════════════════════════"
     echo
@@ -2752,7 +3422,26 @@ show_system_info() {
     if [ -f "proxy-config.env" ]; then
         log_info "当前配置:"
         source proxy-config.env
-        echo "  端口: $PROXY_PORT"
+        
+        # 显示协议类型
+        local protocol_display
+        case "${PROXY_PROTOCOL:-http}" in
+            http) protocol_display="HTTP" ;;
+            socks5) protocol_display="SOCKS5" ;;
+            both) protocol_display="HTTP + SOCKS5" ;;
+        esac
+        echo "  协议: $protocol_display"
+        
+        # 显示端口
+        if [ "${PROXY_PROTOCOL:-http}" = "http" ] || [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+            echo "  HTTP 端口: $PROXY_PORT"
+        fi
+        if [ "${PROXY_PROTOCOL:-http}" = "both" ] && [ -n "$PROXY_SOCKS5_PORT" ]; then
+            echo "  SOCKS5 端口: $PROXY_SOCKS5_PORT"
+        elif [ "${PROXY_PROTOCOL:-http}" = "socks5" ]; then
+            echo "  SOCKS5 端口: $PROXY_PORT"
+        fi
+        
         echo "  用户名: $PROXY_USERNAME"
         echo "  密码: $PROXY_PASSWORD"
         echo "  IP白名单: $([ "$ENABLE_WHITELIST" = true ] && echo "启用" || echo "禁用")"
@@ -2764,8 +3453,18 @@ show_system_info() {
         local external_ip
         external_ip=$(get_external_ip)
 
-        echo "  代理URL (本地): http://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_PORT"
-        echo "  代理URL (外部): http://$PROXY_USERNAME:$PROXY_PASSWORD@$external_ip:$PROXY_PORT"
+        # 显示代理 URL
+        if [ "${PROXY_PROTOCOL:-http}" = "http" ] || [ "${PROXY_PROTOCOL:-http}" = "both" ]; then
+            echo "  HTTP 代理 (本地): http://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_PORT"
+            echo "  HTTP 代理 (外部): http://$PROXY_USERNAME:$PROXY_PASSWORD@$external_ip:$PROXY_PORT"
+        fi
+        if [ "${PROXY_PROTOCOL:-http}" = "both" ] && [ -n "$PROXY_SOCKS5_PORT" ]; then
+            echo "  SOCKS5 代理 (本地): socks5://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_SOCKS5_PORT"
+            echo "  SOCKS5 代理 (外部): socks5://$PROXY_USERNAME:$PROXY_PASSWORD@$external_ip:$PROXY_SOCKS5_PORT"
+        elif [ "${PROXY_PROTOCOL:-http}" = "socks5" ]; then
+            echo "  SOCKS5 代理 (本地): socks5://$PROXY_USERNAME:$PROXY_PASSWORD@127.0.0.1:$PROXY_PORT"
+            echo "  SOCKS5 代理 (外部): socks5://$PROXY_USERNAME:$PROXY_PASSWORD@$external_ip:$PROXY_PORT"
+        fi
     else
         echo "  未发现配置文件"
     fi
@@ -2944,7 +3643,7 @@ main_loop() {
         show_banner
         show_menu
 
-        read -p "请选择功能 [1-18] (或按 q 退出): " choice
+        read -p "请选择功能 [1-22] (或按 q 退出): " choice
         echo
 
         case "$choice" in
@@ -2987,32 +3686,49 @@ main_loop() {
                 restart_proxy_service
                 ;;
             12)
-                enable_autostart
+                test_proxy_connectivity
+                wait_for_key
                 ;;
             13)
-                disable_autostart
+                health_check
+                wait_for_key
                 ;;
             14)
-                check_autostart_status
+                view_logs
+                wait_for_key
                 ;;
             15)
-                cleanup_files
+                clean_logs
+                wait_for_key
                 ;;
             16)
-                show_help
+                show_traffic_stats
+                wait_for_key
                 ;;
             17)
-                update_script
+                enable_autostart
                 ;;
             18)
-                view_logs
+                disable_autostart
+                ;;
+            19)
+                check_autostart_status
+                ;;
+            20)
+                cleanup_files
+                ;;
+            21)
+                show_help
+                ;;
+            22)
+                update_script
                 ;;
             [qQ]|[qQ][uU][iI][tT])
-                log_info "感谢使用 Xray HTTP 代理一体化脚本！"
+                log_info "感谢使用 Xray HTTP/SOCKS5 代理一体化脚本！"
                 exit 0
                 ;;
             *)
-                log_error "无效选择，请输入 1-18 或 q"
+                log_error "无效选择，请输入 1-22 或 q"
                 sleep 2
                 ;;
         esac
@@ -3042,11 +3758,15 @@ $SCRIPT_NAME v$SCRIPT_VERSION
     $0 --restart               重启代理服务
     $0 --whitelist             管理白名单
     $0 --test                  测试 Playwright 集成
+    $0 --test-connectivity     测试代理连通性
+    $0 --health-check          系统健康检查
     $0 --info                  查看系统信息
     $0 --cleanup               清理配置文件
     $0 --validate-config       验证配置文件
     $0 --update                更新脚本到最新版本
-    $0 --logs                  查看实时日志
+    $0 --logs                  日志管理
+    $0 --clean-logs            清理日志
+    $0 --stats                 流量统计
 
 开机自启动:
     $0 --enable-autostart      启用开机自启动
@@ -3112,6 +3832,14 @@ parse_args() {
                 test_playwright
                 exit 0
                 ;;
+            --test-connectivity|test-connectivity)
+                test_proxy_connectivity
+                exit $?
+                ;;
+            --health-check|health-check)
+                health_check
+                exit $?
+                ;;
             --info|info)
                 show_system_info
                 exit 0
@@ -3143,6 +3871,14 @@ parse_args() {
             --logs|logs)
                 view_logs
                 exit $?
+                ;;
+            --clean-logs|clean-logs)
+                clean_logs
+                exit 0
+                ;;
+            --stats|stats)
+                show_traffic_stats
+                exit 0
                 ;;
             -p|--port)
                 PORT="$2"

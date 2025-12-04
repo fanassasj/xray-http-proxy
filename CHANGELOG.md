@@ -1,5 +1,435 @@
 # 更新日志
 
+## [v2.4.1] - 2025-12-04
+
+### 🔧 修复双协议显示和 SOCKS5 测试问题 ⭐⭐⭐
+
+**问题1**: 双协议模式下，很多地方只显示/测试一个协议
+**问题2**: Playwright 测试 SOCKS5 失败（浏览器不支持 SOCKS5 认证）
+
+#### 修复内容
+
+**1. 系统信息显示** (`show_system_info`)
+- ✅ 显示协议类型（HTTP / SOCKS5 / HTTP + SOCKS5）
+- ✅ 分别显示 HTTP 和 SOCKS5 端口
+- ✅ 显示两个协议的完整 URL
+- ✅ 本地和外部访问地址都显示
+
+**修复前**:
+```
+端口: 19689
+代理URL (本地): http://user@127.0.0.1:19689
+```
+
+**修复后**:
+```
+协议: HTTP + SOCKS5
+HTTP 端口: 19689
+SOCKS5 端口: 29377
+HTTP 代理 (本地): http://user@127.0.0.1:19689
+HTTP 代理 (外部): http://user@35.187.158.105:19689
+SOCKS5 代理 (本地): socks5://user@127.0.0.1:29377
+SOCKS5 代理 (外部): socks5://user@35.187.158.105:29377
+```
+
+**2. Playwright 测试** (`test_playwright`)
+- ✅ 检测协议类型
+- ✅ 双协议模式提供选择菜单
+  - 测试 HTTP 代理
+  - 测试 SOCKS5 代理
+  - 测试两个协议
+- ✅ 自动选择对应的测试脚本
+- ✅ 显示测试结果和文件
+
+**测试选项**:
+```
+当前配置协议: both
+检测到双协议模式 (HTTP + SOCKS5)
+
+选择测试协议:
+  1) 测试 HTTP 代理
+  2) 测试 SOCKS5 代理
+  3) 测试两个协议
+
+请选择 [1-3] (默认: 1):
+```
+
+**3. SOCKS5 测试脚本修复** (`test-socks5.js`)
+
+**问题**: Chromium 不支持 SOCKS5 代理认证
+```
+Error: Browser does not support socks5 proxy authentication
+```
+
+**解决方案**: 改用 curl 测试 SOCKS5
+- ✅ 使用 curl 测试 SOCKS5 连接
+- ✅ 测试 IP 检测
+- ✅ 测试网站访问
+- ✅ 添加限制说明
+
+**新测试输出**:
+```
+[INFO] 开始 SOCKS5 代理测试...
+[WARNING] Chromium 不支持 SOCKS5 认证，将使用 curl 测试
+[INFO] 使用 curl 测试 SOCKS5 连接...
+
+[TEST 1] 测试 IP 检测...
+[SUCCESS] ✓ 当前 IP: 35.187.158.105
+
+[TEST 2] 测试网站访问...
+[SUCCESS] ✓ https://example.com
+[SUCCESS] ✓ https://httpbin.org/get
+[SUCCESS] ✓ https://www.google.com
+
+[SUCCESS] 成功访问 3/3 个网站
+[SUCCESS] ✅ SOCKS5 代理测试完成！
+
+[INFO] 注意: Playwright/Chromium 不支持 SOCKS5 认证
+[INFO] 如需在 Playwright 中使用 SOCKS5，请使用 HTTP 代理
+```
+
+**4. 文档更新**
+
+**SOCKS5_GUIDE.md**:
+- ✅ 添加 Playwright 限制说明
+- ✅ 推荐使用 HTTP 代理
+- ✅ 提供替代方案
+- ✅ 更新常见问题
+
+**重要说明**:
+```
+⚠️ Chromium/Firefox/WebKit 不支持 SOCKS5 代理认证
+
+推荐方案:
+✅ 方案1: 使用 HTTP 代理（推荐）
+✅ 方案2: 配置双协议模式
+❌ 不可行: 直接在 Playwright 中使用带认证的 SOCKS5
+```
+
+#### 改进点
+
+**用户体验**:
+- 清晰显示所有协议信息
+- 灵活的测试选项
+- 完整的测试覆盖
+- 明确的限制说明
+
+**信息完整性**:
+- 不遗漏任何协议
+- 显示所有端口和 URL
+- 测试所有配置的协议
+- 说明浏览器限制
+
+**测试可靠性**:
+- SOCKS5 测试改用 curl
+- 避免浏览器限制
+- 提供准确的测试结果
+
+#### 兼容性
+
+- ✅ 完全向后兼容
+- ✅ 单协议模式正常工作
+- ✅ 自动适配协议类型
+- ✅ 测试脚本独立运行
+
+#### 使用建议
+
+**Playwright 用户**:
+- 使用 HTTP 代理（推荐）
+- 或配置双协议模式，Playwright 用 HTTP
+
+**命令行工具用户**:
+- 使用 SOCKS5 代理（性能更好）
+- curl、git、ssh 等完美支持
+
+**最佳实践**:
+- 配置双协议模式
+- Playwright 用 HTTP
+- 其他应用用 SOCKS5
+- 获得最大兼容性和性能
+
+---
+
+## [v2.4.0] - 2025-12-04
+
+### 🎉 新增运维管理功能 ⭐⭐⭐⭐⭐
+
+**重大更新**: 完善的运维和监控功能
+
+#### 新增功能
+
+**1. 连通性测试** 🧪
+- 自动测试 HTTP 代理连接
+- 自动测试 SOCKS5 代理连接
+- 实时显示测试结果
+- 支持命令行: `./xray-http-proxy.sh --test-connectivity`
+
+**2. 系统健康检查** 🏥
+- 6 项全面检查
+  - Xray 安装状态
+  - 配置文件有效性
+  - 服务运行状态
+  - 端口监听状态
+  - 日志文件状态
+  - 代理连通性
+- 一键诊断所有问题
+- 支持命令行: `./xray-http-proxy.sh --health-check`
+
+**3. 日志管理** 📜
+- 查看日志（最后 50/100 行）
+- 实时监控日志
+- 搜索日志内容
+- 日志清理（清空/保留最后 N 行/备份）
+- 自动日志轮转（超过 50MB）
+- 支持命令行: `./xray-http-proxy.sh --logs`
+
+**4. 流量统计** 📊
+- 总连接数统计
+- 错误次数统计
+- 最近活动时间
+- 最近连接记录
+- 支持命令行: `./xray-http-proxy.sh --stats`
+
+#### 菜单更新
+
+**新增菜单项**:
+```
+12. 🧪 连通性测试
+13. 🏥 系统健康检查
+14. 📜 日志管理
+15. 🧹 清理日志
+16. 📊 流量统计
+```
+
+菜单项从 18 个增加到 22 个
+
+#### 命令行参数
+
+**新增参数**:
+```bash
+--test-connectivity    # 测试代理连通性
+--health-check        # 系统健康检查
+--logs                # 日志管理
+--clean-logs          # 清理日志
+--stats               # 流量统计
+```
+
+#### 使用示例
+
+**健康检查**:
+```bash
+./xray-http-proxy.sh --health-check
+
+# 输出示例
+🏥 系统健康检查
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[1/6] 检查 Xray 安装
+✓ Xray 已安装
+
+[2/6] 检查配置文件
+✓ 配置文件有效
+
+[3/6] 检查服务状态
+✓ 服务正在运行
+
+[4/6] 检查端口监听
+✓ HTTP 端口 13053 正在监听
+✓ SOCKS5 端口 14052 正在监听
+
+[5/6] 检查日志文件
+✓ 日志文件存在 (大小: 36K)
+
+[6/6] 连通性测试
+✓ 代理连接正常
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎉 健康检查通过，系统运行正常！
+```
+
+**连通性测试**:
+```bash
+./xray-http-proxy.sh --test-connectivity
+
+# 测试 HTTP 和 SOCKS5 代理
+✓ HTTP 代理连接成功
+✓ SOCKS5 代理连接成功
+🎉 所有测试通过 (2/2)
+```
+
+**流量统计**:
+```bash
+./xray-http-proxy.sh --stats
+
+# 显示连接数、错误数、最近活动
+```
+
+**日志管理**:
+```bash
+./xray-http-proxy.sh --logs
+
+# 交互式日志管理菜单
+1) 查看最后 50 行
+2) 查看最后 100 行
+3) 实时监控日志
+4) 搜索日志
+```
+
+#### 自动化功能
+
+**日志轮转**:
+- 日志超过 50MB 自动轮转
+- 保留最近 5 个备份
+- 自动压缩旧日志
+
+**健康检查集成**:
+- 启动时自动检查
+- 配置验证集成
+- 问题自动诊断
+
+#### 代码改进
+
+**新增函数**:
+- `test_proxy_connectivity()` - 连通性测试
+- `health_check()` - 健康检查
+- `view_logs()` - 查看日志
+- `clean_logs()` - 清理日志
+- `rotate_logs()` - 日志轮转
+- `show_traffic_stats()` - 流量统计
+
+**代码统计**:
+- 新增代码: ~400 行
+- 总代码量: ~3800 行
+- 新增功能: 6 个
+
+#### 优势
+
+**运维友好**:
+- 一键诊断问题
+- 自动化日志管理
+- 实时监控能力
+
+**问题排查**:
+- 快速定位故障
+- 详细的错误信息
+- 完整的检查流程
+
+**资源管理**:
+- 防止日志占满磁盘
+- 自动清理旧文件
+- 流量使用统计
+
+#### 兼容性
+
+- ✅ 完全向后兼容
+- ✅ 所有原有功能正常
+- ✅ 新功能可选使用
+
+---
+
+## [v2.3.0] - 2025-12-04
+
+### 🎉 新增 SOCKS5 协议支持 ⭐⭐⭐⭐⭐
+
+**重大更新**: 多协议支持
+
+#### 新增功能
+
+**1. 协议选择**
+- HTTP 代理（原有功能）
+- SOCKS5 代理（新增）
+- HTTP + SOCKS5 双协议（推荐）
+
+**2. 配置增强**
+- 新增 `PROXY_PROTOCOL` 配置项
+- 新增 `PROXY_SOCKS5_PORT` 配置项
+- 支持独立端口配置
+- 自动端口冲突检测
+
+**3. 功能特性**
+- SOCKS5 支持 UDP 转发
+- 统一认证机制（HTTP 和 SOCKS5 使用相同凭据）
+- IP 白名单同时作用于两种协议
+- 智能端口分配（避免冲突）
+
+**4. 测试支持**
+- 新增 `test-socks5.js` 测试脚本
+- 支持 Playwright SOCKS5 代理测试
+- 完整的测试用例
+
+#### 代码改进
+
+**配置向导** (`configure_port`)
+- 协议选择界面
+- 分别配置 HTTP 和 SOCKS5 端口
+- 端口冲突自动处理
+
+**配置生成** (`generate_config`)
+- 动态构建 inbounds 数组
+- 支持单协议和双协议模式
+- 路由规则自动适配
+
+**启动函数** (`start_proxy`)
+- 加载协议配置
+- 多端口健康检查
+- 详细的启动日志
+
+**使用说明** (`show_usage_info`)
+- 分别显示 HTTP 和 SOCKS5 信息
+- Playwright 示例代码
+- 协议类型标识
+
+#### 使用示例
+
+**配置双协议**:
+```bash
+./xray-http-proxy.sh --configure
+# 选择 "3) HTTP + SOCKS5 双协议"
+```
+
+**Playwright 使用**:
+```javascript
+// HTTP 代理
+const browser = await chromium.launch({
+  proxy: { server: 'http://IP:PORT', username: 'user', password: 'pass' }
+});
+
+// SOCKS5 代理
+const browser = await chromium.launch({
+  proxy: { server: 'socks5://IP:PORT', username: 'user', password: 'pass' }
+});
+```
+
+**测试**:
+```bash
+node test-proxy.js      # 测试 HTTP
+node test-socks5.js     # 测试 SOCKS5
+```
+
+#### 配置文件格式
+
+```bash
+PROXY_PROTOCOL=both          # http, socks5, both
+PROXY_PORT=13053            # HTTP 端口
+PROXY_SOCKS5_PORT=14052     # SOCKS5 端口
+PROXY_USERNAME=user_xxx
+PROXY_PASSWORD=xxx
+```
+
+#### 优势
+
+- **更广泛的应用支持**: SSH、Git、Docker 等
+- **更好的性能**: SOCKS5 协议开销更小
+- **UDP 支持**: HTTP 代理不支持 UDP
+- **灵活性**: 可根据需求选择协议
+
+#### 兼容性
+
+- ✅ 完全向后兼容
+- ✅ 旧配置文件自动适配（默认 HTTP）
+- ✅ 所有原有功能正常工作
+
+---
+
 ## [v2.2.3] - 2025-11-11
 
 ### 🔧 修复开机自启动不使用配置文件问题 ⭐⭐⭐⭐⭐

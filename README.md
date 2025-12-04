@@ -1,6 +1,6 @@
-# Xray HTTP 代理一体化脚本
+# Xray HTTP/SOCKS5 代理一体化脚本
 
-一个基于 Xray 核心的 HTTP 代理服务器一体化解决方案，支持 Playwright 自动化测试、IP 白名单、随机端口等高级功能。
+一个基于 Xray 核心的多协议代理服务器一体化解决方案，支持 HTTP 和 SOCKS5 协议、Playwright 自动化测试、IP 白名单、随机端口等高级功能。
 
 [![GitHub](https://img.shields.io/badge/GitHub-fanassasj/xray--http--proxy-blue?logo=github)](https://github.com/fanassasj/xray-http-proxy)
 [![License](https://img.shields.io/badge/License-MIT-green)](https://github.com/fanassasj/xray-http-proxy/blob/main/LICENSE)
@@ -9,12 +9,17 @@
 ## ✨ 主要特性
 
 - 🚀 **一键安装部署** - 自动安装 Xray 核心和配置代理
+- 🌐 **多协议支持** - HTTP、SOCKS5 或双协议同时运行
 - 🎲 **随机端口生成** - 自动生成 10000-65535 范围内的随机端口
 - 🔐 **自动认证生成** - 自动生成安全的用户名和密码
 - 🛡️ **IP 白名单控制** - 支持客户端 IP 访问控制（支持单个 IP 和 CIDR 网段）
 - 🎭 **Playwright 集成** - 完美支持 Playwright 自动化测试
 - 🌐 **外部 IP 支持** - 自动获取外部 IP，支持远程访问
 - 📱 **交互式管理** - 友好的命令行界面和菜单系统
+- 🧪 **连通性测试** - 自动测试代理连接状态
+- 🏥 **健康检查** - 全面的系统状态检查
+- 📊 **流量统计** - 连接数和使用情况统计
+- 📜 **日志管理** - 完善的日志查看和清理功能
 
 ## 🚀 快速开始
 
@@ -37,7 +42,7 @@ chmod +x xray-http-proxy.sh
 # 启动交互式菜单
 ./xray-http-proxy.sh
 
-# 快速启动代理（随机端口）
+# 快速启动代理（随机端口，默认双协议）
 ./xray-http-proxy.sh --start -d
 
 # 指定端口启动
@@ -48,6 +53,13 @@ chmod +x xray-http-proxy.sh
 ```
 
 ## 📖 使用说明
+
+### 协议选择
+
+配置时可选择：
+1. **HTTP 代理** - 适用于浏览器、Playwright 等
+2. **SOCKS5 代理** - 适用于更广泛的应用（SSH、Git、Docker 等）
+3. **HTTP + SOCKS5 双协议** - 同时提供两种协议（推荐）
 
 ### 命令行选项
 
@@ -77,41 +89,120 @@ chmod +x xray-http-proxy.sh
 
 ## 🎭 Playwright 集成
 
-### Node.js 使用示例
+### HTTP 代理示例
 
+**Node.js:**
 ```javascript
 const { chromium } = require('playwright');
 
 const browser = await chromium.launch({
   proxy: {
-    server: 'http://YOUR_SERVER_IP:PORT',
+    server: 'http://YOUR_SERVER_IP:HTTP_PORT',
     username: 'GENERATED_USERNAME',
     password: 'GENERATED_PASSWORD'
   }
 });
-
-const context = await browser.newContext();
-const page = await context.newPage();
-await page.goto('https://example.com');
 ```
 
-### Python 使用示例
-
+**Python:**
 ```python
 from playwright.sync_api import sync_playwright
 
 with sync_playwright() as p:
     browser = p.chromium.launch(
         proxy={
-            "server": "http://YOUR_SERVER_IP:PORT",
+            "server": "http://YOUR_SERVER_IP:HTTP_PORT",
             "username": "GENERATED_USERNAME",
             "password": "GENERATED_PASSWORD"
         }
     )
-    page = browser.new_page()
-    page.goto("https://example.com")
-    browser.close()
 ```
+
+### SOCKS5 代理示例
+
+**Node.js:**
+```javascript
+const { chromium } = require('playwright');
+
+const browser = await chromium.launch({
+  proxy: {
+    server: 'socks5://YOUR_SERVER_IP:SOCKS5_PORT',
+    username: 'GENERATED_USERNAME',
+    password: 'GENERATED_PASSWORD'
+  }
+});
+```
+
+**Python:**
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(
+        proxy={
+            "server": "socks5://YOUR_SERVER_IP:SOCKS5_PORT",
+            "username": "GENERATED_USERNAME",
+            "password": "GENERATED_PASSWORD"
+        }
+    )
+```
+
+## 🧪 测试代理
+
+```bash
+# 测试 HTTP 代理
+node test-proxy.js
+
+# 测试 SOCKS5 代理
+node test-socks5.js
+```
+
+## 🔧 运维管理
+
+### 连通性测试
+```bash
+# 测试代理是否正常工作
+./xray-http-proxy.sh --test-connectivity
+```
+
+### 健康检查
+```bash
+# 全面检查系统状态
+./xray-http-proxy.sh --health-check
+
+# 检查项目:
+# - Xray 安装状态
+# - 配置文件有效性
+# - 服务运行状态
+# - 端口监听状态
+# - 日志文件状态
+# - 代理连通性
+```
+
+### 日志管理
+```bash
+# 查看日志
+./xray-http-proxy.sh --logs
+
+# 清理日志
+./xray-http-proxy.sh --clean-logs
+
+# 日志自动轮转（超过 50MB）
+```
+
+### 流量统计
+```bash
+# 查看使用统计
+./xray-http-proxy.sh --stats
+
+# 显示:
+# - 总连接数
+# - 错误次数
+# - 最近活动
+# - 连接记录
+```
+
+详细运维指南: [OPS_GUIDE.md](OPS_GUIDE.md)
 
 ## 🛡️ 安全特性
 
@@ -155,7 +246,7 @@ cd xray-http-proxy
 # 2. 安装 Xray
 ./xray-http-proxy.sh --install
 
-# 3. 配置代理
+# 3. 配置代理（选择协议）
 ./xray-http-proxy.sh --configure
 
 # 4. 启动服务
@@ -182,24 +273,6 @@ cd xray-http-proxy
 ./update.sh
 ```
 
-**方法 3: 手动更新**
-```bash
-# 备份配置
-cp proxy-config.env proxy-config.env.backup
-
-# 停止服务
-./xray-http-proxy.sh --stop
-
-# 拉取更新
-git pull origin main
-
-# 恢复配置
-cp proxy-config.env.backup proxy-config.env
-
-# 重启服务
-./xray-http-proxy.sh --start -d
-```
-
 完整的部署和更新指南：**[DEPLOYMENT.md](DEPLOYMENT.md)**
 
 ## 🔧 故障排除
@@ -218,13 +291,16 @@ cp proxy-config.env.backup proxy-config.env
    ./xray-http-proxy.sh --install
    ```
 
-3. **Playwright 测试失败**
+3. **代理测试失败**
    ```bash
    # 检查代理状态
    ./xray-http-proxy.sh --status
 
-   # 手动测试连接
+   # 手动测试 HTTP
    curl -x http://USER:PASS@127.0.0.1:PORT https://httpbin.org/ip
+
+   # 手动测试 SOCKS5
+   curl --socks5 USER:PASS@127.0.0.1:PORT https://httpbin.org/ip
    ```
 
 ### 日志查看
@@ -235,6 +311,9 @@ ps aux | grep xray
 
 # 查看端口监听
 netstat -tlnp | grep :PORT
+
+# 查看日志
+tail -f xray-proxy.log
 ```
 
 ## 📄 许可证
@@ -244,11 +323,11 @@ MIT License
 ## 📚 完整文档
 
 - **[README.md](README.md)** - 项目介绍和快速开始（本文档）
-- **[DEPLOYMENT.md](DEPLOYMENT.md)** - 部署和更新指南（推荐阅读）
+- **[SOCKS5_GUIDE.md](SOCKS5_GUIDE.md)** - SOCKS5 使用指南
+- **[OPS_GUIDE.md](OPS_GUIDE.md)** - 运维管理功能指南
+- **[DEPLOYMENT.md](DEPLOYMENT.md)** - 部署和更新指南
 - **[AUTOSTART_GUIDE.md](AUTOSTART_GUIDE.md)** - 开机自启动详细指南
-- **[OPTIMIZATION_SUMMARY.md](OPTIMIZATION_SUMMARY.md)** - 项目优化说明
 - **[CHANGELOG.md](CHANGELOG.md)** - 版本更新日志
-- **[PROJECT_COMPLETION_REPORT.md](PROJECT_COMPLETION_REPORT.md)** - 项目完成度报告
 
 ## 🤝 贡献
 
